@@ -11,6 +11,7 @@ contract EscrowMarketplaceTest is Test {
 
     address client = makeAddr("client");
     address freelancer = makeAddr("freelancer");
+    address stranger =makeAddr("stranger");
 
     uint256 amount = 1_000e18;
     uint256 deadline;
@@ -34,6 +35,30 @@ contract EscrowMarketplaceTest is Test {
         uint256 amount
     );
 
+    event JobAccepted(
+        uint256 indexed jobId,
+        address indexed freelancer
+    );
+
+    // Helpers
+    function _createJob() internal returns (uint256 jobId) {
+        vm.startPrank(client);
+
+        token.approve(address(marketplace), amount);
+
+        jobId = marketplace.createJob({
+            freelancer: freelancer,
+            token: address(token),
+            amount: amount,
+            deadline: deadline,
+            metadataURI: metadataURI
+        });
+
+        vm.stopPrank();
+    }
+
+
+    //Setup and tests
     function setUp() public {
         marketplace = new EscrowMarketplace();
         token = new MockERC20();
@@ -369,5 +394,70 @@ contract EscrowMarketplaceTest is Test {
         vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
 
         marketplace.getJob(0);
+    }
+
+    function test_FreelancerCanAcceptJob() public {
+        uint256 jobId = _createJob();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.InProgress));
+    }
+
+    function test_AcceptJob_EmitsEvent() public {
+        uint256 jobId = _createJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit JobAccepted(jobId, freelancer);
+        
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+    }
+
+    function test_RevertIf_ClientTriesToAcceptJob() public {
+        uint256 jobId = _createJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.acceptJob(jobId);
+    }
+
+    function test_RevertIf_StrangerTriesToAcceptJob() public {
+        uint256 jobId = _createJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.acceptJob(jobId);
+    }
+
+    function test_RevertIf_JobIsAlreadyAccepted() public {
+        uint256 jobId = _createJob();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+    }
+
+    function test_RevertIf_AcceptedJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+        
+        vm.prank(freelancer);
+        marketplace.acceptJob(1);
+    } 
+
+    function test_RevertIf_AcceptedJobIdIsZero() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+        
+        vm.prank(freelancer);
+        marketplace.acceptJob(0);
     }
 }

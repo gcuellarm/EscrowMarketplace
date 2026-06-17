@@ -37,9 +37,13 @@ contract EscrowMarketplace {
     error InvalidDeadline();
     error InvalidFreelancer();
     error JobDoesNotExist();
+    error Unauthorized();
+    error InvalidJobStatus();
+
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
     event JobFunded(uint256 indexed jobId, address indexed client, address token, uint256 amount);
+    event JobAccepted(uint256 indexed jobId, address indexed freelancer);
 
     constructor() {
         nextJobId = 1;
@@ -61,7 +65,6 @@ contract EscrowMarketplace {
         if (amount == 0) {
             revert InvalidAmount();
         }
-
         if (deadline <= block.timestamp) {
             revert InvalidDeadline();
         }
@@ -92,5 +95,25 @@ contract EscrowMarketplace {
         }
 
         return jobs[jobId];
+    }
+
+    function acceptJob (uint256 jobId) external{
+        if(jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+        
+        if(msg.sender != job.freelancer) {
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.Funded) {
+            revert InvalidJobStatus();
+        }
+
+        job.status = JobStatus.InProgress;
+        
+        emit JobAccepted(jobId, msg.sender);
     }
 }
