@@ -26,6 +26,7 @@ contract EscrowMarketplace {
         uint256 deadline;
         JobStatus status;
         string metadataURI;
+        string deliveryURI;
     }
 
     uint256 public nextJobId;
@@ -39,11 +40,15 @@ contract EscrowMarketplace {
     error JobDoesNotExist();
     error Unauthorized();
     error InvalidJobStatus();
+    error EmptyDeliveryURI();
+    error DeadlinePassed();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
     event JobFunded(uint256 indexed jobId, address indexed client, address token, uint256 amount);
     event JobAccepted(uint256 indexed jobId, address indexed freelancer);
+    event WorkSubmitted(uint256 indexed jobId, address indexed freelancer, string deliveryURI);
+
 
     constructor() {
         nextJobId = 1;
@@ -78,7 +83,8 @@ contract EscrowMarketplace {
             amount: amount,
             deadline: deadline,
             status: JobStatus.Funded,
-            metadataURI: metadataURI
+            metadataURI: metadataURI,
+            deliveryURI: ""
         });
 
         nextJobId++;
@@ -116,4 +122,34 @@ contract EscrowMarketplace {
         
         emit JobAccepted(jobId, msg.sender);
     }
+
+    function submitWork(uint256 jobId, string calldata deliveryURI) external {
+        if(jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.freelancer) {
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.InProgress) {
+            revert InvalidJobStatus();
+        }
+
+        if(block.timestamp > job.deadline) {
+            revert DeadlinePassed();
+        }
+
+        if(bytes(deliveryURI).length == 0) {
+            revert EmptyDeliveryURI();
+        }
+
+        job.deliveryURI = deliveryURI;
+        job.status = JobStatus.Submitted;
+
+        emit WorkSubmitted(jobId, msg.sender, deliveryURI);
+    }
+    
 }

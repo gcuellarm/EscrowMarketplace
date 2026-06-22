@@ -18,6 +18,8 @@ contract EscrowMarketplaceTest is Test {
 
     string metadataURI = "ipfs://job-metadata";
 
+    string deliveryURI = "ipfs://job-delivery";
+
     event JobCreated(
         uint256 indexed jobId,
         address indexed client,
@@ -40,6 +42,13 @@ contract EscrowMarketplaceTest is Test {
         address indexed freelancer
     );
 
+
+    event WorkSubmitted(
+        uint256 indexed jobId,
+        address indexed freelancer,
+        string deliveryURI
+    );
+
     // Helpers
     function _createJob() internal returns (uint256 jobId) {
         vm.startPrank(client);
@@ -55,6 +64,13 @@ contract EscrowMarketplaceTest is Test {
         });
 
         vm.stopPrank();
+    }
+
+    function _createAndAcceptJob() internal returns (uint256 jobId) {
+        jobId = _createJob();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
     }
 
 
@@ -93,6 +109,7 @@ contract EscrowMarketplaceTest is Test {
         assertEq(job.deadline, deadline);
         assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Funded));
         assertEq(job.metadataURI, metadataURI);
+        assertEq(job.deliveryURI, "");
     }
 
     function test_CreateJob_TransfersFundsToEscrow() public {
@@ -460,4 +477,111 @@ contract EscrowMarketplaceTest is Test {
         vm.prank(freelancer);
         marketplace.acceptJob(0);
     }
+
+    ///////////////////////////////////////////
+    // submitWork
+    ///////////////////////////////////////////
+    function test_FreelancerCanSubmitWork() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Submitted));
+        assertEq(job.deliveryURI, deliveryURI);
+    }
+
+    function test_SubmitWork_EmitsEvent() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit WorkSubmitted(jobId, freelancer, deliveryURI);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_ClientTriesToSubmitWork() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_StrangerTriesToSubmitWork() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_JobIsNotInProgress() public {
+        uint256 jobId = _createJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_WorkIsSubmittedTwice() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_DeliveryURIIsEmpty() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.EmptyDeliveryURI.selector);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, "");
+    }
+
+    function test_RevertIf_DeadlineHasPassed() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline + 1);
+
+        vm.expectRevert(EscrowMarketplace.DeadlinePassed.selector);
+        
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+
+    }
+
+    function test_FreelancerCanSubmitExactlyAtDeadline() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Submitted));
+        assertEq(job.deliveryURI, deliveryURI);
+    }
+
+    function test_RevertIf_SubmittedJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(999, deliveryURI);
+    }
+
+
 }
