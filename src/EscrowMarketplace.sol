@@ -31,6 +31,11 @@ contract EscrowMarketplace {
 
     uint256 public nextJobId;
 
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+
+    uint256 public platformFeeBps;
+    address public feeRecipient;
+
     mapping(uint256 => Job) private jobs;
 
     error InvalidAddress();
@@ -42,15 +47,28 @@ contract EscrowMarketplace {
     error InvalidJobStatus();
     error EmptyDeliveryURI();
     error DeadlinePassed();
+    error InvalidFee();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
     event JobFunded(uint256 indexed jobId, address indexed client, address token, uint256 amount);
     event JobAccepted(uint256 indexed jobId, address indexed freelancer);
     event WorkSubmitted(uint256 indexed jobId, address indexed freelancer, string deliveryURI);
+    event WorkApproved(uint256 indexed jobId, address indexed client);
+    event PaymentReleased(uint256 indexed jobId, address indexed freelancer, uint256 freelancerAmount, uint256 platformFee);
 
 
-    constructor() {
+    constructor(address feeRecipient_, uint256 platformFeeBps_) {
+        if (feeRecipient_ == address(0)) {
+            revert InvalidAddress();
+        }
+        if (platformFeeBps_ > BPS_DENOMINATOR) {
+            revert InvalidFee();
+        }
+        
+        feeRecipient = feeRecipient_;
+        platformFeeBps = platformFeeBps_;
+
         nextJobId = 1;
     }
 
@@ -150,6 +168,39 @@ contract EscrowMarketplace {
         job.status = JobStatus.Submitted;
 
         emit WorkSubmitted(jobId, msg.sender, deliveryURI);
+    }
+
+    function approveWork(uint256 jobId) external {
+        if(jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.client) {
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.Submitted) {
+            revert InvalidJobStatus();
+        }
+
+        uint256 fee = (job.amount * platformFeeBps) / BPS_DENOMINATOR;
+
+        uint256 freelancerPayment = job.amount - fee;
+
+        uint256 freelancerAmount = job.amount - fee;
+
+        job.status = JobStatus.Completed;
+
+        IERC20(job.token).safeTransfer(job.freelancer, freelancerAmount);
+
+        if (fee > 0) {
+            IERC20(job.token).safeTransfer(feeRecipient, fee);
+        }
+
+        emit WorkApproved(jobId, msg.sender);
+        emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
     }
     
 }

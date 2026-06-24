@@ -20,6 +20,10 @@ contract EscrowMarketplaceTest is Test {
 
     string deliveryURI = "ipfs://job-delivery";
 
+    address feeRecipient = makeAddr("feeRecipient");
+
+    uint256 platformFeeBps = 500;
+
     event JobCreated(
         uint256 indexed jobId,
         address indexed client,
@@ -49,6 +53,18 @@ contract EscrowMarketplaceTest is Test {
         string deliveryURI
     );
 
+    event WorkApproved(
+        uint256 indexed jobId,
+        address indexed client
+    );
+
+    event PaymentReleased(
+        uint256 indexed jobId,
+        address indexed freelancer,
+        uint256 freelancerAmount,
+        uint256 platformFee
+    );
+
     // Helpers
     function _createJob() internal returns (uint256 jobId) {
         vm.startPrank(client);
@@ -73,10 +89,17 @@ contract EscrowMarketplaceTest is Test {
         marketplace.acceptJob(jobId);
     }
 
+    function _createAcceptAndSubmitJob() internal returns (uint256 jobId) {
+        jobId = _createAndAcceptJob();
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
 
     //Setup and tests
     function setUp() public {
-        marketplace = new EscrowMarketplace();
+        marketplace = new EscrowMarketplace(feeRecipient, platformFeeBps);
         token = new MockERC20();
 
         deadline = block.timestamp + 7 days;
@@ -582,6 +605,164 @@ contract EscrowMarketplaceTest is Test {
         vm.prank(freelancer);
         marketplace.submitWork(999, deliveryURI);
     }
+
+    //////////////////////////////////////
+    // Approve Work Tests
+    //////////////////////////////////////
+
+    function test_ConstructorSetsFeeConfiguration() public {
+        assertEq(marketplace.feeRecipient(), feeRecipient);
+        assertEq(marketplace.platformFeeBps(), platformFeeBps);
+    }
+
+    function test_RevertIf_FeeRecipientIsZeroAddress() public {
+        vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
+
+        new EscrowMarketplace(address(0), platformFeeBps);
+    }
+
+    function test_RevertIf_PlatformFeeIsTooHigh() public {
+        uint256 tooHighFee = 10001; // 100.01%
+
+        vm.expectRevert(EscrowMarketplace.InvalidFee.selector);
+
+        new EscrowMarketplace(feeRecipient, tooHighFee);
+    }
+
+    function test_ClientCanApproveWork() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+        
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Completed));
+    }
+
+    function test_ApproveWork_ReleasesFunds() public {
+        uint256 expectedFee = (amount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+        uint256 expectedFreelancerAmount = amount - expectedFee;
+
+        assertEq(token.balanceOf(address(marketplace)), 0);
+        assertEq(token.balanceOf(freelancer), 0);
+        assertEq(token.balanceOf(feeRecipient), 0);
+
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+        
+        assertEq(token.balanceOf(freelancer), expectedFreelancerAmount);
+        assertEq(token.balanceOf(feeRecipient), expectedFee);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_ApproveWork_EmitsWorkApprovedEvent() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit WorkApproved(jobId, client);
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_ApproveWork_EmitsPaymentReleasedEvent() public {
+        uint256 expectedFee =
+        (amount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 expectedFreelancerAmount = amount - expectedFee;
+
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.expectEmit(true, true, false, true);
+
+        emit PaymentReleased(
+            jobId,
+            freelancer,
+            expectedFreelancerAmount,
+            expectedFee
+        );
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+        
+    }
+
+    function test_RevertIf_FreelancerTriesToApproveWork() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(freelancer);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_RevertIf_StrangerTriesToApproveWork() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_RevertIf_JobHasNotBeenSubmitted() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_RevertIf_WorkIsApprovedTwice() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_RevertIf_ApprovedJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(client);
+        marketplace.approveWork(1);
+    }
+
+    function test_WorksIf_FeeIsZero() public {
+        EscrowMarketplace marketplaceWithZeroFee = new EscrowMarketplace(feeRecipient, 0);
+
+        vm.startPrank(client);
+        token.approve(address(marketplaceWithZeroFee), amount);
+        uint256 jobId = marketplaceWithZeroFee.createJob({
+            freelancer: freelancer,
+            token: address(token),
+            amount: amount,
+            deadline: deadline,
+            metadataURI: metadataURI
+        });
+        vm.stopPrank();
+
+        vm.prank(freelancer);
+        marketplaceWithZeroFee.acceptJob(jobId);
+
+        vm.prank(freelancer);
+        marketplaceWithZeroFee.submitWork(jobId, deliveryURI);
+
+        vm.prank(client);
+        marketplaceWithZeroFee.approveWork(jobId);
+
+        assertEq(token.balanceOf(freelancer), amount);
+        assertEq(token.balanceOf(feeRecipient), 0);
+    }
+
 
 
 }
