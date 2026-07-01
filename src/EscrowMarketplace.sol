@@ -48,6 +48,7 @@ contract EscrowMarketplace {
     error EmptyDeliveryURI();
     error DeadlinePassed();
     error InvalidFee();
+    error DeadlineNotPassed();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -56,6 +57,9 @@ contract EscrowMarketplace {
     event WorkSubmitted(uint256 indexed jobId, address indexed freelancer, string deliveryURI);
     event WorkApproved(uint256 indexed jobId, address indexed client);
     event PaymentReleased(uint256 indexed jobId, address indexed freelancer, uint256 freelancerAmount, uint256 platformFee);
+    event JobCancelled(uint256 indexed jobId, address indexed client);
+    event ClientRefunded(uint256 indexed jobId, address indexed client, uint256 amount);
+
 
 
     constructor(address feeRecipient_, uint256 platformFeeBps_) {
@@ -201,6 +205,56 @@ contract EscrowMarketplace {
 
         emit WorkApproved(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
+    }
+
+    function cancelJob (uint256 jobId) external {
+        if(jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.client) {
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.Funded) {
+            revert InvalidJobStatus();
+        }
+
+        job.status = JobStatus.Cancelled;
+
+        IERC20(job.token).safeTransfer(job.client, job.amount);
+
+        emit JobCancelled(jobId, msg.sender);
+        emit ClientRefunded(jobId, msg.sender, job.amount);
+    }
+
+    function cancelExpiredJob (uint256 jobId) external {
+        if(jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.client) {
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.InProgress) {
+            revert InvalidJobStatus();
+        }
+
+        if(block.timestamp <= job.deadline) {
+            revert DeadlineNotPassed();
+        }
+
+        job.status = JobStatus.Cancelled;
+
+        IERC20(job.token).safeTransfer(job.client, job.amount);
+
+        emit JobCancelled(jobId, msg.sender);
+        emit ClientRefunded(jobId, msg.sender, job.amount);
     }
     
 }

@@ -65,6 +65,17 @@ contract EscrowMarketplaceTest is Test {
         uint256 platformFee
     );
 
+    event JobCancelled(
+        uint256 indexed jobId,
+        address indexed client
+    );
+
+    event ClientRefunded(
+        uint256 indexed jobId,
+        address indexed client,
+        uint256 amount
+    );
+
     // Helpers
     function _createJob() internal returns (uint256 jobId) {
         vm.startPrank(client);
@@ -763,6 +774,158 @@ contract EscrowMarketplaceTest is Test {
         assertEq(token.balanceOf(feeRecipient), 0);
     }
 
+    ///////////////////////////////////////////
+    // cancelJob / cancelExpiredJob Tests
+    ///////////////////////////////////////////
+
+    function test_ClientCanCancelFundedJob() public {
+        uint256 jobId = _createJob();
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(
+            uint256(job.status),
+            uint256(EscrowMarketplace.JobStatus.Cancelled)
+        );
+    }
+
+    function test_CancelJob_RefundsClient() public {
+        uint256 jobId = _createJob();
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+
+        assertEq(clientBalanceBefore, 0);
+        assertEq(token.balanceOf(address(marketplace)), amount);
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+
+        uint256 clientBalanceAfter = token.balanceOf(client);
+
+        assertEq(clientBalanceAfter, clientBalanceBefore + amount);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_CancelJob_EmitsJobCancelledEvent() public {
+        uint256 jobId = _createJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit JobCancelled(jobId, client);
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+    }
+
+    function test_CancelJob_EmitsClientRefundedEvent() public {
+        uint256 jobId = _createJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit ClientRefunded(jobId, client, amount);
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+    }
+
+    function test_RevertIf_FreelancerTriesToCancelJob() public {
+        uint256 jobId = _createJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(freelancer);
+        marketplace.cancelJob(jobId);
+    }
+
+    function test_RevertIf_CancelJobIsAlreadyInProgress() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+    }
+
+    function test_ClientCanCancelExpiredJob() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+
+        vm.warp(deadline + 1);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+
+        uint256 clientBalanceAfter = token.balanceOf(client);
+
+        assertEq(
+            uint256(marketplace.getJob(jobId).status),
+            uint256(EscrowMarketplace.JobStatus.Cancelled)
+        );
+
+        assertEq(clientBalanceAfter, clientBalanceBefore + amount);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_RevertIf_ClientCancelsBeforeDeadline() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.DeadlineNotPassed.selector);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+    }
+
+    function test_RevertIf_ClientCancelsExactlyAtDeadline() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline);
+
+        vm.expectRevert(EscrowMarketplace.DeadlineNotPassed.selector);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+    }
+
+    function test_RevertIf_FreelancerCancelsExpiredJob() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline + 1);
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(freelancer);
+        marketplace.cancelExpiredJob(jobId);
+    }
+
+    function test_RevertIf_CancelWhenJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(client);
+        marketplace.cancelJob(1);
+    }
+
+    function test_RevertIf_CancelExpiredJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(1);
+    }
+
+    function test_RevertIf_CancelExpiredJobIsAlreadyCancelled() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline + 1);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+    }
 
 
 }
