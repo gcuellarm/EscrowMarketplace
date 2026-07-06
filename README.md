@@ -13,13 +13,14 @@ A Foundry-based Solidity escrow marketplace where clients can fund freelance job
 - **Work acceptance flow**: the assigned freelancer can accept a funded job and move it into progress.
 - **Work submission flow**: freelancers can submit a `deliveryURI` before the deadline.
 - **Client approval flow**: clients can approve submitted work and release payment.
+- **Dispute opening flow**: the client or freelancer can move an in-progress or submitted job into `Disputed` status with a `disputeReasonURI`.
 - **Platform fee support** in basis points, with fees sent to a configured recipient.
 - **Client cancellation flow**:
   - funded jobs can be cancelled by the client before the freelancer accepts;
   - in-progress jobs can be cancelled by the client after the deadline has passed.
 - **Refund handling** for cancelled jobs.
 - **Custom errors and events** for clearer failure handling and easier indexing.
-- **Foundry tests** covering the main happy paths, access control, validation rules, events, fees, refunds, and deadline behavior.
+- **Foundry tests** covering the main happy paths, access control, validation rules, events, fees, refunds, deadline behavior, and dispute opening rules.
 
 ## Contract overview
 
@@ -33,7 +34,9 @@ src/EscrowMarketplace.sol
 
 ```text
 Created/Funded → InProgress → Submitted → Completed
-       │              │
+       │              │            │
+       │              │            └── Disputed by client or freelancer
+       │              ├── Disputed by client or freelancer
        │              └── Cancelled after deadline by client
        └── Cancelled before acceptance by client
 ```
@@ -52,6 +55,7 @@ Each job stores:
 - current status
 - metadata URI
 - delivery URI
+- dispute reason URI
 
 ## Main functions
 
@@ -62,6 +66,7 @@ Each job stores:
 | `acceptJob(jobId)` | Lets the assigned freelancer accept a funded job. |
 | `submitWork(jobId, deliveryURI)` | Lets the freelancer submit work before the deadline. |
 | `approveWork(jobId)` | Lets the client approve work and release payment minus platform fee. |
+| `openDispute(jobId, reasonURI)` | Lets the client or freelancer open a dispute for an in-progress or submitted job. |
 | `cancelJob(jobId)` | Lets the client cancel a funded job before it starts and receive a refund. |
 | `cancelExpiredJob(jobId)` | Lets the client cancel an in-progress job after its deadline and receive a refund. |
 
@@ -109,7 +114,7 @@ forge fmt
 ## Important notes ⚠️
 
 - The contract is currently designed around ERC20 payments only.
-- There is no dispute resolution mechanism implemented yet, even though `Disputed` exists in the status enum.
+- Disputes can now be opened, but there is no dispute resolution or arbitration mechanism implemented yet.
 - There is no admin function yet to update platform fees or the fee recipient after deployment.
 - The project has not been audited.
 - Do not use this in production without a full security review.

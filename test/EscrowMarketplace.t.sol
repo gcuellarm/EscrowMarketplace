@@ -24,6 +24,8 @@ contract EscrowMarketplaceTest is Test {
 
     uint256 platformFeeBps = 500;
 
+    string disputeReasonURI = "ipfs://dispute-reason";
+
     event JobCreated(
         uint256 indexed jobId,
         address indexed client,
@@ -74,6 +76,12 @@ contract EscrowMarketplaceTest is Test {
         uint256 indexed jobId,
         address indexed client,
         uint256 amount
+    );
+
+    event DisputeOpened(
+        uint256 indexed jobId,
+        address indexed openedBy,
+        string reasonURI
     );
 
     // Helpers
@@ -925,6 +933,166 @@ contract EscrowMarketplaceTest is Test {
 
         vm.prank(client);
         marketplace.cancelExpiredJob(jobId);
+    }
+
+    ///////////////////////////////////////////
+    // openDispute() Tests
+    ///////////////////////////////////////////
+
+    function test_ClientCanOpenDisputeWhileJobIsInProgress() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Disputed));
+        assertEq(job.disputeReasonURI,disputeReasonURI);
+    }
+
+    function test_FreelancerCanOpenDisputeWhileJobIsInProgress() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(freelancer);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Disputed));
+        assertEq(job.disputeReasonURI,disputeReasonURI);
+    }
+
+    function test_ClientCanOpenDisputeAfterWorkIsSubmitted() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Disputed));
+    }
+
+    function test_FreelancerCanOpenDisputeAfterWorkIsSubmitted() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(freelancer);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Disputed));
+    }
+
+    function test_OpenDispute_KeepsFundsInEscrow() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(token.balanceOf(address(marketplace)), job.amount);
+    }
+
+    function test_OpenDispute_EmitsEvent() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectEmit(true, true, false, true);
+        emit DisputeOpened(jobId, client, disputeReasonURI);
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_StrangerTriesToOpenDispute() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_DisputeIsOpenedBeforeJobAcceptance() public {
+        uint256 jobId = _createJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_DisputeIsAlreadyOpen() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+        
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(freelancer);
+        marketplace.openDispute(jobId, "ipfs://another-reason");        
+    }
+
+    function test_RevertIf_DisputeReasonURIIsEmpty() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.expectRevert(EscrowMarketplace.EmptyDisputeReasonURI.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, ""); 
+    }
+
+    function test_RevertIf_DisputedJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(1, disputeReasonURI);
+    }
+
+    function test_RevertIf_DisputedJobIdIsZero() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(0, disputeReasonURI);
+    }
+
+    function test_RevertIf_CancelledJobIsDisputed() public {
+        uint256 jobId = _createJob();
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+        
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_CompletedJobIsDisputed() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_ClientApprovesDisputedJob() public{
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
     }
 
 

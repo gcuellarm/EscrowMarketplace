@@ -27,6 +27,7 @@ contract EscrowMarketplace {
         JobStatus status;
         string metadataURI;
         string deliveryURI;
+        string disputeReasonURI;
     }
 
     uint256 public nextJobId;
@@ -49,6 +50,8 @@ contract EscrowMarketplace {
     error DeadlinePassed();
     error InvalidFee();
     error DeadlineNotPassed();
+    error EmptyDisputeReasonURI();
+
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -59,6 +62,7 @@ contract EscrowMarketplace {
     event PaymentReleased(uint256 indexed jobId, address indexed freelancer, uint256 freelancerAmount, uint256 platformFee);
     event JobCancelled(uint256 indexed jobId, address indexed client);
     event ClientRefunded(uint256 indexed jobId, address indexed client, uint256 amount);
+    event DisputeOpened(uint256 indexed jobId, address indexed openedBy, string ReasonURI);
 
 
 
@@ -106,7 +110,8 @@ contract EscrowMarketplace {
             deadline: deadline,
             status: JobStatus.Funded,
             metadataURI: metadataURI,
-            deliveryURI: ""
+            deliveryURI: "",
+            disputeReasonURI: ""
         });
 
         nextJobId++;
@@ -255,6 +260,32 @@ contract EscrowMarketplace {
 
         emit JobCancelled(jobId, msg.sender);
         emit ClientRefunded(jobId, msg.sender, job.amount);
+    }
+
+    function openDispute(uint256 jobId, string calldata reasonURI) external {
+        if(jobId == 0 || jobId >= nextJobId){
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.client && msg.sender != job.freelancer){
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.InProgress && job.status != JobStatus.Submitted){
+            revert InvalidJobStatus();
+        }
+
+        if(bytes(reasonURI).length == 0){
+            revert EmptyDisputeReasonURI();
+        }
+
+        job.disputeReasonURI = reasonURI;
+
+        job.status = JobStatus.Disputed;
+
+        emit DisputeOpened(jobId, msg.sender, reasonURI);
     }
     
 }
