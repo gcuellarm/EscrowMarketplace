@@ -26,6 +26,8 @@ contract EscrowMarketplaceTest is Test {
 
     string disputeReasonURI = "ipfs://dispute-reason";
 
+    address arbitrator = makeAddr("arbitrator");
+
     event JobCreated(
         uint256 indexed jobId,
         address indexed client,
@@ -84,6 +86,13 @@ contract EscrowMarketplaceTest is Test {
         string reasonURI
     );
 
+    event DisputeResolved(
+        uint256 indexed jobId,
+        address indexed arbitrator,
+        uint256 clientAmount,
+        uint256 freelancerAmount
+    );
+
     // Helpers
     function _createJob() internal returns (uint256 jobId) {
         vm.startPrank(client);
@@ -115,10 +124,17 @@ contract EscrowMarketplaceTest is Test {
         marketplace.submitWork(jobId, deliveryURI);
     }
 
+    function _createAcceptSubmitAndDisputeJob() internal returns (uint256 jobId) {
+        jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
 
     //Setup and tests
     function setUp() public {
-        marketplace = new EscrowMarketplace(feeRecipient, platformFeeBps);
+        marketplace = new EscrowMarketplace(feeRecipient, platformFeeBps, arbitrator);
         token = new MockERC20();
 
         deadline = block.timestamp + 7 days;
@@ -152,6 +168,16 @@ contract EscrowMarketplaceTest is Test {
         assertEq(uint256(job.status), uint256(EscrowMarketplace.JobStatus.Funded));
         assertEq(job.metadataURI, metadataURI);
         assertEq(job.deliveryURI, "");
+    }
+
+    function test_RevertIf_ArbitratorIsZeroAddress() public {
+        vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
+
+        new EscrowMarketplace(
+            feeRecipient,
+            platformFeeBps,
+            address(0)
+        );
     }
 
     function test_CreateJob_TransfersFundsToEscrow() public {
@@ -632,12 +658,13 @@ contract EscrowMarketplaceTest is Test {
     function test_ConstructorSetsFeeConfiguration() public {
         assertEq(marketplace.feeRecipient(), feeRecipient);
         assertEq(marketplace.platformFeeBps(), platformFeeBps);
+        assertEq(marketplace.arbitrator(), arbitrator);
     }
 
     function test_RevertIf_FeeRecipientIsZeroAddress() public {
         vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
 
-        new EscrowMarketplace(address(0), platformFeeBps);
+        new EscrowMarketplace(address(0), platformFeeBps, arbitrator);
     }
 
     function test_RevertIf_PlatformFeeIsTooHigh() public {
@@ -645,7 +672,7 @@ contract EscrowMarketplaceTest is Test {
 
         vm.expectRevert(EscrowMarketplace.InvalidFee.selector);
 
-        new EscrowMarketplace(feeRecipient, tooHighFee);
+        new EscrowMarketplace(feeRecipient, tooHighFee, arbitrator);
     }
 
     function test_ClientCanApproveWork() public {
@@ -756,7 +783,7 @@ contract EscrowMarketplaceTest is Test {
     }
 
     function test_WorksIf_FeeIsZero() public {
-        EscrowMarketplace marketplaceWithZeroFee = new EscrowMarketplace(feeRecipient, 0);
+        EscrowMarketplace marketplaceWithZeroFee = new EscrowMarketplace(feeRecipient, 0, arbitrator);
 
         vm.startPrank(client);
         token.approve(address(marketplaceWithZeroFee), amount);
@@ -1093,6 +1120,219 @@ contract EscrowMarketplaceTest is Test {
 
         vm.prank(client);
         marketplace.approveWork(jobId);
+    }
+
+    ///////////////////////////////////////////
+    // openDispute() Tests
+    ///////////////////////////////////////////
+
+    function test_ConstructorSetsArbitrator() public view {
+        assertEq(marketplace.arbitrator(), arbitrator);
+    }
+
+    function test_ArbitratorCanResolveDisputeFullyForClient() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(
+            uint256(job.status),
+            uint256(EscrowMarketplace.JobStatus.Completed)
+        );
+
+        assertEq(token.balanceOf(client), amount);
+        assertEq(token.balanceOf(freelancer), 0);
+        assertEq(token.balanceOf(feeRecipient), 0);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_ArbitratorCanResolveDisputeFullyForFreelancer() public {
+        uint256 expectedFee =
+            (amount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 expectedFreelancerAmount = amount - expectedFee;
+
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, 0, amount);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(
+            uint256(job.status),
+            uint256(EscrowMarketplace.JobStatus.Completed)
+        );
+
+        assertEq(token.balanceOf(client), 0);
+        assertEq(token.balanceOf(freelancer), expectedFreelancerAmount);
+        assertEq(token.balanceOf(feeRecipient), expectedFee);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_ArbitratorCanResolveDisputePartially() public {
+        uint256 clientAmount = amount / 2;
+        uint256 freelancerAmount = amount / 2;
+
+        uint256 expectedFee =
+            (freelancerAmount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 expectedFreelancerAmount = freelancerAmount - expectedFee;
+
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, clientAmount, freelancerAmount);
+
+        EscrowMarketplace.Job memory job = marketplace.getJob(jobId);
+
+        assertEq(
+            uint256(job.status),
+            uint256(EscrowMarketplace.JobStatus.Completed)
+        );
+
+        assertEq(token.balanceOf(client), clientAmount);
+        assertEq(token.balanceOf(freelancer), expectedFreelancerAmount);
+        assertEq(token.balanceOf(feeRecipient), expectedFee);
+        assertEq(token.balanceOf(address(marketplace)), 0);
+    }
+
+    function test_ResolveDispute_EmitsDisputeResolvedEvent() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        uint256 clientAmount = amount / 2;
+        uint256 freelancerAmount = amount / 2;
+
+        vm.expectEmit(true, true, false, true);
+
+        emit DisputeResolved(
+            jobId,
+            arbitrator,
+            clientAmount,
+            freelancerAmount
+        );
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, clientAmount, freelancerAmount);
+    }
+
+    function test_ResolveDispute_EmitsClientRefundedEvent() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectEmit(true, true, false, true);
+
+        emit ClientRefunded(
+            jobId,
+            client,
+            amount
+        );
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_ResolveDispute_EmitsPaymentReleasedEvent() public {
+        uint256 expectedFee =
+            (amount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 expectedFreelancerAmount = amount - expectedFee;
+
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectEmit(true, true, false, true);
+
+        emit PaymentReleased(
+            jobId,
+            freelancer,
+            expectedFreelancerAmount,
+            expectedFee
+        );
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, 0, amount);
+    }
+
+    function test_RevertIf_NonArbitratorTriesToResolveDispute() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_FreelancerTriesToResolveDispute() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(freelancer);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_StrangerTriesToResolveDispute() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_JobIsNotDisputed() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_ResolutionAmountsAreLowerThanJobAmount() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidResolutionAmounts.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount - 1, 0);
+    }
+
+    function test_RevertIf_ResolutionAmountsAreHigherThanJobAmount() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.expectRevert(EscrowMarketplace.InvalidResolutionAmounts.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 1);
+    }
+
+    function test_RevertIf_DisputeIsResolvedTwice() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+
+        vm.expectRevert(EscrowMarketplace.InvalidJobStatus.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_ResolvedJobDoesNotExist() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(1, amount, 0);
+    }
+
+    function test_RevertIf_ResolvedJobIdIsZero() public {
+        vm.expectRevert(EscrowMarketplace.JobDoesNotExist.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(0, amount, 0);
     }
 
 

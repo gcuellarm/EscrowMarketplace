@@ -36,6 +36,7 @@ contract EscrowMarketplace {
 
     uint256 public platformFeeBps;
     address public feeRecipient;
+    address public arbitrator;
 
     mapping(uint256 => Job) private jobs;
 
@@ -51,7 +52,7 @@ contract EscrowMarketplace {
     error InvalidFee();
     error DeadlineNotPassed();
     error EmptyDisputeReasonURI();
-
+    error InvalidResolutionAmounts();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -63,11 +64,15 @@ contract EscrowMarketplace {
     event JobCancelled(uint256 indexed jobId, address indexed client);
     event ClientRefunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event DisputeOpened(uint256 indexed jobId, address indexed openedBy, string ReasonURI);
+    event DisputeResolved(uint256 indexed jobId, address indexed arbitrator, uint256 clientAmount, uint256 freelancerAmount);
 
 
 
-    constructor(address feeRecipient_, uint256 platformFeeBps_) {
+    constructor(address feeRecipient_, uint256 platformFeeBps_, address arbitrator_) {
         if (feeRecipient_ == address(0)) {
+            revert InvalidAddress();
+        }
+        if (arbitrator_ == address(0)) {
             revert InvalidAddress();
         }
         if (platformFeeBps_ > BPS_DENOMINATOR) {
@@ -76,6 +81,7 @@ contract EscrowMarketplace {
         
         feeRecipient = feeRecipient_;
         platformFeeBps = platformFeeBps_;
+        arbitrator = arbitrator_;
 
         nextJobId = 1;
     }
@@ -286,6 +292,51 @@ contract EscrowMarketplace {
         job.status = JobStatus.Disputed;
 
         emit DisputeOpened(jobId, msg.sender, reasonURI);
+    }
+
+    function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external {
+        if(jobId == 0 || jobId >= nextJobId){
+            revert JobDoesNotExist();
+        }
+
+        if(msg.sender != arbitrator){
+            revert Unauthorized();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(job.status != JobStatus.Disputed){
+            revert InvalidJobStatus();
+        }
+
+        if(clientAmount + freelancerAmount != job.amount){
+            revert InvalidResolutionAmounts();
+        }
+
+        uint256 fee = freelancerAmount * platformFeeBps / BPS_DENOMINATOR;
+        uint256 freelancerNetAmount = freelancerAmount - fee;
+
+        job.status = JobStatus.Completed;
+
+        if(clientAmount > 0) {
+            IERC20(job.token).transfer(job.client, clientAmount);
+        }
+
+        if(freelancerNetAmount > 0) {
+            IERC20(job.token).transfer(job.freelancer, freelancerNetAmount);
+        }
+
+        if(fee > 0) {
+            IERC20(job.token).transfer(feeRecipient, fee);
+        }
+
+        emit DisputeResolved(jobId, msg.sender, clientAmount, freelancerAmount);
+
+        if(clientAmount > 0) {
+            emit ClientRefunded(jobId, job.client, clientAmount);
+        }
+        
+        emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
     }
     
 }
