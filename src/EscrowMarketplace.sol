@@ -24,6 +24,7 @@ contract EscrowMarketplace {
         address token;
         uint256 amount;
         uint256 deadline;
+        uint256 submittedAt;
         JobStatus status;
         string metadataURI;
         string deliveryURI;
@@ -37,6 +38,7 @@ contract EscrowMarketplace {
     uint256 public platformFeeBps;
     address public feeRecipient;
     address public arbitrator;
+    uint256 public reviewPeriod;
 
     mapping(uint256 => Job) private jobs;
 
@@ -53,6 +55,8 @@ contract EscrowMarketplace {
     error DeadlineNotPassed();
     error EmptyDisputeReasonURI();
     error InvalidResolutionAmounts();
+    error InvalidReviewPeriod();
+    error ReviewPeriodNotPassed();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -65,10 +69,11 @@ contract EscrowMarketplace {
     event ClientRefunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event DisputeOpened(uint256 indexed jobId, address indexed openedBy, string ReasonURI);
     event DisputeResolved(uint256 indexed jobId, address indexed arbitrator, uint256 clientAmount, uint256 freelancerAmount);
+    event PaymentClaimedAfterReview(uint256 indexed jobId, address indexed freelancer);
 
 
 
-    constructor(address feeRecipient_, uint256 platformFeeBps_, address arbitrator_) {
+    constructor(address feeRecipient_, uint256 platformFeeBps_, address arbitrator_, uint256 reviewPeriod_) {
         if (feeRecipient_ == address(0)) {
             revert InvalidAddress();
         }
@@ -78,10 +83,14 @@ contract EscrowMarketplace {
         if (platformFeeBps_ > BPS_DENOMINATOR) {
             revert InvalidFee();
         }
+        if(reviewPeriod_ == 0) {
+            revert InvalidReviewPeriod();
+        }
         
         feeRecipient = feeRecipient_;
         platformFeeBps = platformFeeBps_;
         arbitrator = arbitrator_;
+        reviewPeriod = reviewPeriod_;
 
         nextJobId = 1;
     }
@@ -114,6 +123,7 @@ contract EscrowMarketplace {
             token: token,
             amount: amount,
             deadline: deadline,
+            submittedAt: 0,
             status: JobStatus.Funded,
             metadataURI: metadataURI,
             deliveryURI: "",
@@ -180,6 +190,7 @@ contract EscrowMarketplace {
         }
 
         job.deliveryURI = deliveryURI;
+        job.submittedAt = block.timestamp;
         job.status = JobStatus.Submitted;
 
         emit WorkSubmitted(jobId, msg.sender, deliveryURI);
@@ -337,6 +348,39 @@ contract EscrowMarketplace {
         }
         
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
+    }
+
+    function claimAfterReviewPeriod(uint256 jobId) external {
+        if(jobId == 0 || jobId >= nextJobId){
+            revert JobDoesNotExist();
+        }
+
+        Job storage job = jobs[jobId];
+
+        if(msg.sender != job.freelancer){
+            revert Unauthorized();
+        }
+
+        if(job.status != JobStatus.Submitted){
+            revert InvalidJobStatus();
+        }
+
+        if(block.timestamp < job.submittedAt + reviewPeriod){
+            revert ReviewPeriodNotPassed();
+        }
+
+        uint256 fee = job.amount * platformFeeBps / BPS_DENOMINATOR;
+        uint256 freelancerNetAmount = job.amount - fee;
+
+        job.status = JobStatus.Completed;
+
+        IERC20(job.token).safeTransfer(job.freelancer, freelancerNetAmount);
+        if(fee > 0){
+            IERC20(job.token).safeTransfer(feeRecipient, fee);
+        }
+
+        emit PaymentClaimedAfterReview(jobId, msg.sender);
+        emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);
     }
     
 }
