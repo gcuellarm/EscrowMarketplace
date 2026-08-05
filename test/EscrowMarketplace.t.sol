@@ -95,6 +95,9 @@ contract EscrowMarketplaceTest is Test {
         address indexed freelancer
     );
 
+    event MarketPlacePaused(address indexed owner);
+    event MarketPlaceUnpaused(address indexed owner);
+
     ///////////////////////////////////////////
     // Helpers
     ///////////////////////////////////////////
@@ -676,6 +679,8 @@ contract EscrowMarketplaceTest is Test {
         assertEq(marketplace.arbitrator(), arbitrator);
         assertEq(marketplace.reviewPeriod(), reviewPeriod);
         assertEq(marketplace.BPS_DENOMINATOR(), 10_000);
+        assertEq(marketplace.owner(), address(this));
+        assertEq(marketplace.paused(), false);
     }
 
     function test_RevertIf_FeeRecipientIsZeroAddress() public {
@@ -1586,4 +1591,192 @@ contract EscrowMarketplaceTest is Test {
         vm.prank(freelancer);
         marketplace.claimAfterReviewPeriod(0);
     }
+
+    ///////////////////////////////////////////
+    // Pause/Unpause Tests
+    ///////////////////////////////////////////
+
+    function test_OwnerCanPauseMarketplace() public {
+        marketplace.pause();
+
+        assertEq(marketplace.paused(), true);
+    }
+
+    function test_PauseMarketplace_EmitsEvent() public {
+        vm.expectEmit(true, false, false, false);
+        emit MarketPlacePaused(address(this));
+
+        marketplace.pause();
+    }
+
+    function test_RevertIf_ClientPausesMarketplace() public {
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.pause();
+    }
+
+    function test_RevertIf_FreelancerPausesMarketplace() public {
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(freelancer);
+        marketplace.pause();
+    }
+
+    function test_RevertIf_StrangerPausesMarketplace() public {
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(stranger);
+        marketplace.pause();
+    }
+
+    function test_RevertIf_PauseMarketplaceTwice() public {
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        marketplace.pause();
+    }
+
+    function test_OwnerCanUnpauseMarketplace() public {
+        marketplace.pause();
+        marketplace.unpause();
+
+        assertEq(marketplace.paused(), false);
+    }
+
+    function test_UnpauseMarketplace_EmitsEvent() public {
+        marketplace.pause();
+
+        vm.expectEmit(true, false, false, false);
+        emit MarketPlaceUnpaused(address(this));
+
+        marketplace.unpause();
+    }
+
+    function test_RevertIf_ClientUnpausesMarketplace() public {
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.unpause();
+    }
+
+    function test_RevertIf_UnpauseMarketplaceWhenNotPaused() public {
+        vm.expectRevert(EscrowMarketplace.MarketPlaceNotPaused.selector);
+
+        marketplace.unpause();
+    }
+
+    function test_RevertIf_CreateJobWhenPaused() public {
+        marketplace.pause();
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), amount);
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        marketplace.createJob({
+            freelancer: freelancer,
+            token: address(token),
+            amount: amount,
+            deadline: deadline,
+            metadataURI: metadataURI
+        });
+        vm.stopPrank();
+    }
+
+    function test_RevertIf_AcceptJobWhenPaused() public {
+        uint256 jobId = _createJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+    }
+
+    function test_RevertIf_SubmitWorkWhenPaused() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function test_RevertIf_ApproveWorkWhenPaused() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+    }
+
+    function test_RevertIf_CancelJobWhenPaused() public {
+        uint256 jobId = _createJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+    }
+
+    function test_RevertIf_CancelExpiredJobWhenPaused() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        vm.warp(deadline + 1);
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+    }
+
+    function test_RevertIf_OpenDisputeWhenPaused() public {
+        uint256 jobId = _createAndAcceptJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function test_RevertIf_ResolveDisputeWhenPaused() public {
+        uint256 jobId = _createAcceptSubmitAndDisputeJob();
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(jobId, amount, 0);
+    }
+
+    function test_RevertIf_ClaimAfterReviewPeriodWhenPaused() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.warp(block.timestamp + reviewPeriod);
+
+        marketplace.pause();
+
+        vm.expectRevert(EscrowMarketplace.MarketPlaceIsPaused.selector);
+
+        vm.prank(freelancer);
+        marketplace.claimAfterReviewPeriod(jobId);
+    }
+
 }

@@ -39,6 +39,8 @@ contract EscrowMarketplace {
     address public feeRecipient;
     address public arbitrator;
     uint256 public reviewPeriod;
+    address public owner;
+    bool public paused;
 
     mapping(uint256 => Job) private jobs;
 
@@ -57,6 +59,8 @@ contract EscrowMarketplace {
     error InvalidResolutionAmounts();
     error InvalidReviewPeriod();
     error ReviewPeriodNotPassed();
+    error MarketPlaceIsPaused();
+    error MarketPlaceNotPaused();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -70,6 +74,22 @@ contract EscrowMarketplace {
     event DisputeOpened(uint256 indexed jobId, address indexed openedBy, string ReasonURI);
     event DisputeResolved(uint256 indexed jobId, address indexed arbitrator, uint256 clientAmount, uint256 freelancerAmount);
     event PaymentClaimedAfterReview(uint256 indexed jobId, address indexed freelancer);
+    event MarketPlacePaused(address indexed owner);
+    event MarketPlaceUnpaused(address indexed owner);
+
+    modifier onlyOwner() {
+        if(msg.sender != owner) {
+            revert Unauthorized();
+        }
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if(paused) {
+            revert MarketPlaceIsPaused();
+        }
+        _;
+    }
 
 
 
@@ -93,9 +113,13 @@ contract EscrowMarketplace {
         reviewPeriod = reviewPeriod_;
 
         nextJobId = 1;
+
+        owner = msg.sender;
+
+        paused = false;
     }
 
-    function createJob(address freelancer, address token, uint256 amount, uint256 deadline, string calldata metadataURI) external returns (uint256 jobId) {
+    function createJob(address freelancer, address token, uint256 amount, uint256 deadline, string calldata metadataURI) external whenNotPaused returns (uint256 jobId)  {
         if (freelancer == address(0)) {
             revert InvalidAddress();
         }
@@ -146,7 +170,7 @@ contract EscrowMarketplace {
         return jobs[jobId];
     }
 
-    function acceptJob (uint256 jobId) external{
+    function acceptJob (uint256 jobId) external whenNotPaused{
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -166,7 +190,7 @@ contract EscrowMarketplace {
         emit JobAccepted(jobId, msg.sender);
     }
 
-    function submitWork(uint256 jobId, string calldata deliveryURI) external {
+    function submitWork(uint256 jobId, string calldata deliveryURI) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -196,7 +220,7 @@ contract EscrowMarketplace {
         emit WorkSubmitted(jobId, msg.sender, deliveryURI);
     }
 
-    function approveWork(uint256 jobId) external {
+    function approveWork(uint256 jobId) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -229,7 +253,7 @@ contract EscrowMarketplace {
         emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
     }
 
-    function cancelJob (uint256 jobId) external {
+    function cancelJob (uint256 jobId) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -252,7 +276,7 @@ contract EscrowMarketplace {
         emit ClientRefunded(jobId, msg.sender, job.amount);
     }
 
-    function cancelExpiredJob (uint256 jobId) external {
+    function cancelExpiredJob (uint256 jobId) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -279,7 +303,7 @@ contract EscrowMarketplace {
         emit ClientRefunded(jobId, msg.sender, job.amount);
     }
 
-    function openDispute(uint256 jobId, string calldata reasonURI) external {
+    function openDispute(uint256 jobId, string calldata reasonURI) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId){
             revert JobDoesNotExist();
         }
@@ -305,7 +329,7 @@ contract EscrowMarketplace {
         emit DisputeOpened(jobId, msg.sender, reasonURI);
     }
 
-    function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external {
+    function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId){
             revert JobDoesNotExist();
         }
@@ -350,7 +374,7 @@ contract EscrowMarketplace {
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
     }
 
-    function claimAfterReviewPeriod(uint256 jobId) external {
+    function claimAfterReviewPeriod(uint256 jobId) external whenNotPaused {
         if(jobId == 0 || jobId >= nextJobId){
             revert JobDoesNotExist();
         }
@@ -381,6 +405,18 @@ contract EscrowMarketplace {
 
         emit PaymentClaimedAfterReview(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);
+    }
+
+    function pause() external onlyOwner {
+        if(paused) revert MarketPlaceIsPaused();
+        paused = true;
+        emit MarketPlacePaused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        if(!paused) revert MarketPlaceNotPaused();
+        paused = false;
+        emit MarketPlaceUnpaused(msg.sender);
     }
     
 }
