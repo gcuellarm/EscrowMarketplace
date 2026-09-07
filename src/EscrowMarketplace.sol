@@ -76,6 +76,10 @@ contract EscrowMarketplace {
     event PaymentClaimedAfterReview(uint256 indexed jobId, address indexed freelancer);
     event MarketPlacePaused(address indexed owner);
     event MarketPlaceUnpaused(address indexed owner);
+    event FeeRecipientUpdated(address indexed oldFeeRecipient, address indexed newFeeRecipient);
+    event PlatformFeeUpdated(uint256 oldFeeBps, uint256 newFeeBps);
+    event ArbitratorUpdated(address indexed oldArbitrator, address indexed newArbitrator);
+    event ReviewPeriodUpdated(uint256 oldReviewPeriod, uint256 newReviewPeriod);
 
     modifier onlyOwner() {
         if(msg.sender != owner) {
@@ -405,6 +409,42 @@ contract EscrowMarketplace {
 
         emit PaymentClaimedAfterReview(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);
+    }
+
+    function setFeeRecipient(address newFeeRecipient_) external onlyOwner{
+        if(newFeeRecipient_ == address(0)){
+            revert InvalidAddress();
+        }
+        address oldFeeRecipient = feeRecipient;
+        feeRecipient = newFeeRecipient_;
+        emit FeeRecipientUpdated(oldFeeRecipient, newFeeRecipient_);
+    }
+
+    function setPlatformFee(uint256 newFeeBps_) external onlyOwner{
+        if(newFeeBps_ > BPS_DENOMINATOR){
+            revert InvalidFee();
+        }
+        uint256 oldFeeBps = platformFeeBps;
+        platformFeeBps = newFeeBps_;
+        emit PlatformFeeUpdated(oldFeeBps, newFeeBps_);
+    }
+
+    function setArbitrator(address newArbitrator_) external onlyOwner{
+        if(newArbitrator_ == address(0)){
+            revert InvalidAddress();
+        }
+        address oldArbitrator = arbitrator;
+        arbitrator = newArbitrator_;
+        emit ArbitratorUpdated(oldArbitrator, newArbitrator_);
+    }
+
+    function setReviewPeriod(uint256 newReviewPeriod_) external onlyOwner{
+        if(newReviewPeriod_ == 0){
+            revert InvalidReviewPeriod();
+        }
+        uint256 oldReviewPeriod = reviewPeriod;
+        reviewPeriod = newReviewPeriod_;
+        emit ReviewPeriodUpdated(oldReviewPeriod, newReviewPeriod_);
     }
 
     function pause() external onlyOwner {

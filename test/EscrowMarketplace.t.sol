@@ -95,6 +95,26 @@ contract EscrowMarketplaceTest is Test {
         address indexed freelancer
     );
 
+    event FeeRecipientUpdated(
+        address indexed oldFeeRecipient,
+        address indexed newFeeRecipient
+    );
+
+    event PlatformFeeUpdated(
+        uint256 oldFeeBps,
+        uint256 newFeeBps
+    );
+
+    event ArbitratorUpdated(
+        address indexed oldArbitrator,
+        address indexed newArbitrator
+    );
+
+    event ReviewPeriodUpdated(
+        uint256 oldReviewPeriod,
+        uint256 newReviewPeriod
+    );
+
     event MarketPlacePaused(address indexed owner);
     event MarketPlaceUnpaused(address indexed owner);
 
@@ -1779,4 +1799,140 @@ contract EscrowMarketplaceTest is Test {
         marketplace.claimAfterReviewPeriod(jobId);
     }
 
+    ///////////////////////////////////////////////////////////////
+    // Set new FeeRecipient, PlatformFee, Arbitrator, ReviewPeriod
+    ///////////////////////////////////////////////////////////////
+
+    function test_OwnerCanSetFeeRecipient() public {
+        address newFeeRecipient = address(6);
+
+        vm.prank(address(this));
+        marketplace.setFeeRecipient(newFeeRecipient);
+
+        assertEq(marketplace.feeRecipient(), newFeeRecipient);
+    }
+
+    function test_SetFeeRecipient_EmitsEvent() public {
+        address newFeeRecipient = makeAddr("newFeeRecipient");
+
+        vm.expectEmit(true, true, false, true);
+        emit FeeRecipientUpdated(feeRecipient, newFeeRecipient);
+
+        marketplace.setFeeRecipient(newFeeRecipient);
+    }
+
+    function test_RevertIf_NonOwnerSetsFeeRecipient() public {
+        address newFeeRecipient = makeAddr("newFeeRecipient");
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.setFeeRecipient(newFeeRecipient);
+    }
+
+    function test_RevertIf_SetFeeRecipientToZeroAddress() public {
+        vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
+
+        marketplace.setFeeRecipient(address(0));
+    }
+
+    function test_OwnerCanSetPlatformFee() public {
+        uint256 newFeeBps = 300;
+
+        marketplace.setPlatformFee(newFeeBps);
+
+        assertEq(marketplace.platformFeeBps(), newFeeBps);
+    }
+
+    function test_SetPlatformFee_EmitsEvent() public {
+        uint256 newFeeBps = 300;
+
+        vm.expectEmit(false, false, false, true);
+        emit PlatformFeeUpdated(platformFeeBps, newFeeBps);
+
+        marketplace.setPlatformFee(newFeeBps);
+    }
+
+    function test_RevertIf_NonOwnerSetsPlatformFee() public {
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.setPlatformFee(300);
+    }
+
+    function test_RevertIf_PlatformFeeIsTooHighWhenUpdated() public {
+        uint256 tooHighFee = marketplace.BPS_DENOMINATOR() + 1;
+
+        vm.expectRevert(EscrowMarketplace.InvalidFee.selector);
+
+        marketplace.setPlatformFee(tooHighFee);
+    }
+
+    function test_OwnerCanSetPlatformFeeToZero() public {
+        marketplace.setPlatformFee(0);
+
+        assertEq(marketplace.platformFeeBps(), 0);
+    }
+
+    function test_OwnerCanSetArbitrator() public {
+        address newArbitrator = makeAddr("newArbitrator");
+
+        marketplace.setArbitrator(newArbitrator);
+
+        assertEq(marketplace.arbitrator(), newArbitrator);
+    }
+
+    function test_SetArbitrator_EmitsEvent() public {
+        address newArbitrator = makeAddr("newArbitrator");
+
+        vm.expectEmit(true, true, false, true);
+        emit ArbitratorUpdated(arbitrator, newArbitrator);
+
+        marketplace.setArbitrator(newArbitrator);
+    }
+
+    function test_RevertIf_NonOwnerSetsArbitrator() public {
+        address newArbitrator = makeAddr("newArbitrator");
+
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.setArbitrator(newArbitrator);
+    }
+
+    function test_RevertIf_ArbitratorIsZeroAddressWhenUpdated() public {
+        vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
+
+        marketplace.setArbitrator(address(0));
+    }       
+
+    function test_OwnerCanSetReviewPeriod() public {
+        uint256 newReviewPeriod = 7 days;
+
+        marketplace.setReviewPeriod(newReviewPeriod);
+
+        assertEq(marketplace.reviewPeriod(), newReviewPeriod);
+    }
+
+    function test_SetReviewPeriod_EmitsEvent() public {
+        uint256 newReviewPeriod = 7 days;
+
+        vm.expectEmit(false, false, false, true);
+        emit ReviewPeriodUpdated(reviewPeriod, newReviewPeriod);
+
+        marketplace.setReviewPeriod(newReviewPeriod);
+    }
+
+    function test_RevertIf_NonOwnerSetsReviewPeriod() public {
+        vm.expectRevert(EscrowMarketplace.Unauthorized.selector);
+
+        vm.prank(client);
+        marketplace.setReviewPeriod(7 days);
+    }
+
+    function test_RevertIf_ReviewPeriodIsZeroWhenUpdated() public {
+        vm.expectRevert(EscrowMarketplace.InvalidReviewPeriod.selector);
+
+        marketplace.setReviewPeriod(0);
+    }
 }
