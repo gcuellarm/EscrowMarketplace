@@ -44,6 +44,9 @@ contract EscrowMarketplace {
 
     mapping(uint256 => Job) private jobs;
 
+    mapping(address => uint256) public totalEscrowed;
+
+
     error InvalidAddress();
     error InvalidAmount();
     error InvalidDeadline();
@@ -61,6 +64,7 @@ contract EscrowMarketplace {
     error ReviewPeriodNotPassed();
     error MarketPlaceIsPaused();
     error MarketPlaceNotPaused();
+    error InsufficientRecoverableBalance();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -80,6 +84,7 @@ contract EscrowMarketplace {
     event PlatformFeeUpdated(uint256 oldFeeBps, uint256 newFeeBps);
     event ArbitratorUpdated(address indexed oldArbitrator, address indexed newArbitrator);
     event ReviewPeriodUpdated(uint256 oldReviewPeriod, uint256 newReviewPeriod);
+    event ERC20Recovered(address indexed token, uint256 amount, address indexed recipient);
 
     modifier onlyOwner() {
         if(msg.sender != owner) {
@@ -162,6 +167,8 @@ contract EscrowMarketplace {
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
+        totalEscrowed[token] += amount;
+
         emit JobCreated(jobId, msg.sender, freelancer, token, amount, deadline, metadataURI);
         emit JobFunded(jobId, msg.sender, token, amount);
     }
@@ -241,17 +248,17 @@ contract EscrowMarketplace {
 
         uint256 fee = (job.amount * platformFeeBps) / BPS_DENOMINATOR;
 
-        uint256 freelancerPayment = job.amount - fee;
-
         uint256 freelancerAmount = job.amount - fee;
-
-        job.status = JobStatus.Completed;
 
         IERC20(job.token).safeTransfer(job.freelancer, freelancerAmount);
 
         if (fee > 0) {
             IERC20(job.token).safeTransfer(feeRecipient, fee);
         }
+
+        totalEscrowed[job.token] -= job.amount;
+
+        job.status = JobStatus.Completed;
 
         emit WorkApproved(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
@@ -272,9 +279,11 @@ contract EscrowMarketplace {
             revert InvalidJobStatus();
         }
 
-        job.status = JobStatus.Cancelled;
-
         IERC20(job.token).safeTransfer(job.client, job.amount);
+
+        totalEscrowed[job.token] -= job.amount;
+
+        job.status = JobStatus.Cancelled;
 
         emit JobCancelled(jobId, msg.sender);
         emit ClientRefunded(jobId, msg.sender, job.amount);
@@ -299,9 +308,11 @@ contract EscrowMarketplace {
             revert DeadlineNotPassed();
         }
 
-        job.status = JobStatus.Cancelled;
-
         IERC20(job.token).safeTransfer(job.client, job.amount);
+
+        totalEscrowed[job.token] -= job.amount;
+
+        job.status = JobStatus.Cancelled;
 
         emit JobCancelled(jobId, msg.sender);
         emit ClientRefunded(jobId, msg.sender, job.amount);
@@ -358,15 +369,15 @@ contract EscrowMarketplace {
         job.status = JobStatus.Completed;
 
         if(clientAmount > 0) {
-            IERC20(job.token).transfer(job.client, clientAmount);
+            IERC20(job.token).safeTransfer(job.client, clientAmount);
         }
 
         if(freelancerNetAmount > 0) {
-            IERC20(job.token).transfer(job.freelancer, freelancerNetAmount);
+            IERC20(job.token).safeTransfer(job.freelancer, freelancerNetAmount);
         }
 
         if(fee > 0) {
-            IERC20(job.token).transfer(feeRecipient, fee);
+            IERC20(job.token).safeTransfer(feeRecipient, fee);
         }
 
         emit DisputeResolved(jobId, msg.sender, clientAmount, freelancerAmount);
@@ -375,6 +386,8 @@ contract EscrowMarketplace {
             emit ClientRefunded(jobId, job.client, clientAmount);
         }
         
+        totalEscrowed[job.token] -= job.amount;
+
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
     }
 
@@ -400,12 +413,14 @@ contract EscrowMarketplace {
         uint256 fee = job.amount * platformFeeBps / BPS_DENOMINATOR;
         uint256 freelancerNetAmount = job.amount - fee;
 
-        job.status = JobStatus.Completed;
-
         IERC20(job.token).safeTransfer(job.freelancer, freelancerNetAmount);
         if(fee > 0){
             IERC20(job.token).safeTransfer(feeRecipient, fee);
         }
+
+        totalEscrowed[job.token] -= job.amount;
+
+        job.status = JobStatus.Completed;
 
         emit PaymentClaimedAfterReview(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);
@@ -445,6 +460,34 @@ contract EscrowMarketplace {
         uint256 oldReviewPeriod = reviewPeriod;
         reviewPeriod = newReviewPeriod_;
         emit ReviewPeriodUpdated(oldReviewPeriod, newReviewPeriod_);
+    }
+
+    function recoverERC20(address token, uint256 amount, address recipient) external onlyOwner {
+        if(token == address(0)){
+            revert InvalidAddress();
+        }
+        if(amount == 0){
+            revert InvalidAmount();
+        }
+        if(recipient == address(0)){
+            revert InvalidAddress();
+        }
+        
+        uint256 balance = IERC20(token).balanceOf(address(this));
+
+        if (balance < totalEscrowed[token]) {
+            revert InsufficientRecoverableBalance();
+        }
+
+        uint256 recoverable = balance - totalEscrowed[token];
+
+        if (amount > recoverable) {
+            revert InsufficientRecoverableBalance();
+        }
+        
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit ERC20Recovered(token, amount, recipient);
     }
 
     function pause() external onlyOwner {

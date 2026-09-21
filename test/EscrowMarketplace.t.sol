@@ -12,6 +12,7 @@ contract EscrowMarketplaceTest is Test {
     address client = makeAddr("client");
     address freelancer = makeAddr("freelancer");
     address stranger = makeAddr("stranger");
+    address recipient = makeAddr("recipient");
 
     uint256 amount = 1_000e18;
     uint256 deadline;
@@ -115,8 +116,27 @@ contract EscrowMarketplaceTest is Test {
         uint256 newReviewPeriod
     );
 
-    event MarketPlacePaused(address indexed owner);
-    event MarketPlaceUnpaused(address indexed owner);
+    event MarketPlacePaused(
+        address indexed owner
+    );
+
+    event MarketPlaceUnpaused(
+        address indexed owner
+    );
+
+    event ERC20Recovered(
+        address indexed token,
+        uint256 amount,
+        address indexed recipient
+    );
+
+    event ERC20Recovered(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
+
+
 
     ///////////////////////////////////////////
     // Helpers
@@ -1934,5 +1954,435 @@ contract EscrowMarketplaceTest is Test {
         vm.expectRevert(EscrowMarketplace.InvalidReviewPeriod.selector);
 
         marketplace.setReviewPeriod(0);
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //                      Acounting
+    ///////////////////////////////////////////////////////////////
+
+    function test_CreateJob_IncreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        assertEq(jobId, 1);
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            jobAmount
+        );
+    }
+
+    function test_CreateMultipleJobs_AccumulatesTotalEscrowed() public {
+        uint256 firstAmount = 100 ether;
+        uint256 secondAmount = 200 ether;
+
+        vm.startPrank(client);
+
+        token.approve(address(marketplace), firstAmount + secondAmount);
+
+        marketplace.createJob(
+            freelancer,
+            address(token),
+            firstAmount,
+            block.timestamp + 1 days,
+            "ipfs://job1"
+        );
+
+        marketplace.createJob(
+            freelancer,
+            address(token),
+            secondAmount,
+            block.timestamp + 1 days,
+            "ipfs://job2"
+        );
+
+        vm.stopPrank();
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            firstAmount + secondAmount
+        );
+    }
+
+    function test_ApproveWork_DecreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, "ipfs://work");
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    function test_CancelJob_DecreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    function test_CancelExpiredJob_DecreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    function test_ResolveDispute_DecreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, "ipfs://work");
+
+        vm.prank(client);
+        marketplace.openDispute(jobId, "ipfs://dispute");
+
+        uint256 clientAmount = 40 ether;
+        uint256 freelancerAmount = 60 ether;
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(
+            jobId,
+            clientAmount,
+            freelancerAmount
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    function test_ClaimAfterReviewPeriod_DecreasesTotalEscrowed() public {
+        uint256 jobAmount = 100 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), jobAmount);
+        uint256 jobId = marketplace.createJob(
+            freelancer,
+            address(token),
+            jobAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, "ipfs://work");
+
+        vm.warp(block.timestamp + reviewPeriod + 1);
+
+        vm.prank(freelancer);
+        marketplace.claimAfterReviewPeriod(jobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //                     RecoverERC20
+    ///////////////////////////////////////////////////////////////
+
+    function test_OwnerCanRecoverERC20() public {
+        uint256 recoverAmount = 100 ether;
+
+        token.mint(address(marketplace), recoverAmount);
+
+        uint256 recipientBalanceBefore = token.balanceOf(recipient);
+
+        marketplace.recoverERC20(
+            address(token),
+            recoverAmount,
+            recipient
+        );
+
+        assertEq(
+            token.balanceOf(recipient),
+            recipientBalanceBefore + recoverAmount
+        );
+
+        assertEq(
+            token.balanceOf(address(marketplace)),
+            0
+        );
+    }
+
+    function test_RecoverERC20_EmitsEvent() public {
+        uint256 recoverAmount = 100 ether;
+
+        token.mint(address(marketplace), recoverAmount);
+
+        vm.expectEmit(true, true, false, true);
+        emit ERC20Recovered(
+            address(token),
+            recoverAmount,
+            recipient
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            recoverAmount,
+            recipient
+        );
+    }
+
+    function test_RevertIf_NonOwnerRecoversERC20() public {
+        uint256 recoverAmount = 100 ether;
+
+        token.mint(address(marketplace), recoverAmount);
+
+        vm.prank(client);
+
+        vm.expectRevert(
+            EscrowMarketplace.Unauthorized.selector
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            recoverAmount,
+            recipient
+        );
+    }
+
+    function test_RevertIf_RecoverERC20TokenIsZeroAddress() public {
+        vm.expectRevert(
+            EscrowMarketplace.InvalidAddress.selector
+        );
+
+        marketplace.recoverERC20(
+            address(0),
+            100 ether,
+            recipient
+        );
+    }
+
+    function test_RevertIf_RecoverERC20RecipientIsZeroAddress() public {
+        token.mint(address(marketplace), 100 ether);
+
+        vm.expectRevert(
+            EscrowMarketplace.InvalidAddress.selector
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            100 ether,
+            address(0)
+        );
+    }
+
+    function test_RevertIf_RecoverERC20AmountIsZero() public {
+        vm.expectRevert(
+            EscrowMarketplace.InvalidAmount.selector
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            0,
+            recipient
+        );
+    }
+
+    function test_RevertIf_RecoverERC20ExceedsRecoverableBalance() public {
+        uint256 escrowAmount = 100 ether;
+        uint256 accidentalAmount = 50 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), escrowAmount);
+        marketplace.createJob(
+            freelancer,
+            address(token),
+            escrowAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        token.mint(
+            address(marketplace),
+            accidentalAmount
+        );
+
+        assertEq(
+            token.balanceOf(address(marketplace)),
+            escrowAmount + accidentalAmount
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            escrowAmount
+        );
+
+        vm.expectRevert(
+            EscrowMarketplace.InsufficientRecoverableBalance.selector
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            accidentalAmount + 1,
+            recipient
+        );
+    }
+
+    function test_RecoverERC20_DoesNotTouchEscrowedFunds() public {
+        uint256 escrowAmount = 100 ether;
+        uint256 accidentalAmount = 50 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), escrowAmount);
+        marketplace.createJob(
+            freelancer,
+            address(token),
+            escrowAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        token.mint(
+            address(marketplace),
+            accidentalAmount
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            accidentalAmount,
+            recipient
+        );
+
+        assertEq(
+            token.balanceOf(address(marketplace)),
+            escrowAmount
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            escrowAmount
+        );
+    }
+
+    function test_RecoverERC20_CanRecoverOnlySurplus() public {
+        uint256 escrowAmount = 100 ether;
+        uint256 accidentalAmount = 50 ether;
+
+        vm.startPrank(client);
+        token.approve(address(marketplace), escrowAmount);
+        marketplace.createJob(
+            freelancer,
+            address(token),
+            escrowAmount,
+            block.timestamp + 1 days,
+            "ipfs://job"
+        );
+        vm.stopPrank();
+
+        token.mint(
+            address(marketplace),
+            accidentalAmount
+        );
+
+        marketplace.recoverERC20(
+            address(token),
+            accidentalAmount,
+            recipient
+        );
+
+        assertEq(
+            token.balanceOf(address(marketplace)),
+            escrowAmount
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            escrowAmount
+        );
+
+        assertEq(
+            token.balanceOf(recipient),
+            accidentalAmount
+        );
     }
 }
