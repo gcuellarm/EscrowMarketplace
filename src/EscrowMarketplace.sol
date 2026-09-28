@@ -149,6 +149,20 @@ contract EscrowMarketplace is ReentrancyGuard {
         }
     }
 
+    function _getJobStorage(
+        uint256 jobId
+    ) internal view returns (Job storage job) {
+        if (jobId == 0 || jobId >= nextJobId) {
+            revert JobDoesNotExist();
+        }
+
+        job = jobs[jobId];
+    }
+
+    function _calculateFee(uint256 amount) internal view returns (uint256) {
+        return (amount * platformFeeBps) / BPS_DENOMINATOR;
+    }
+
     // Public-External Functions
 
     function createJob(address freelancer, address token, uint256 amount, uint256 deadline, string calldata metadataURI) external payable whenNotPaused nonReentrant returns (uint256 jobId)  {
@@ -192,7 +206,9 @@ contract EscrowMarketplace is ReentrancyGuard {
             disputeReasonURI: ""
         });
 
-        nextJobId++;
+        unchecked {
+            ++nextJobId;
+        }
 
         // Transfer ERC20 funds when applicable.
         if (token != address(0)) {
@@ -211,19 +227,11 @@ contract EscrowMarketplace is ReentrancyGuard {
     }
 
     function getJob(uint256 jobId) external view returns (Job memory) {
-        if (jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
-
-        return jobs[jobId];
+        return _getJobStorage(jobId);
     }
 
     function acceptJob (uint256 jobId) external whenNotPaused{
-        if(jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
-
-        Job storage job = jobs[jobId];
+        Job storage job = _getJobStorage(jobId);
         
         if(msg.sender != job.freelancer) {
             revert Unauthorized();
@@ -239,11 +247,7 @@ contract EscrowMarketplace is ReentrancyGuard {
     }
 
     function submitWork(uint256 jobId, string calldata deliveryURI) external whenNotPaused {
-        if(jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
-
-        Job storage job = jobs[jobId];
+        Job storage job = _getJobStorage(jobId);
 
         if(msg.sender != job.freelancer) {
             revert Unauthorized();
@@ -269,11 +273,7 @@ contract EscrowMarketplace is ReentrancyGuard {
     }
 
     function approveWork(uint256 jobId) external whenNotPaused nonReentrant {
-        if(jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
-
-        Job storage job = jobs[jobId];
+        Job storage job = _getJobStorage(jobId);
 
         if(msg.sender != job.client) {
             revert Unauthorized();
@@ -283,30 +283,29 @@ contract EscrowMarketplace is ReentrancyGuard {
             revert InvalidJobStatus();
         }
 
-        uint256 fee = (job.amount * platformFeeBps) / BPS_DENOMINATOR;
-
-        uint256 freelancerAmount = job.amount - fee;
+        uint256 jobAmount = job.amount;
+        address jobToken = job.token;
+        address jobFreelancer = job.freelancer;
+        uint256 fee = _calculateFee(jobAmount);
+        uint256 freelancerAmount = jobAmount - fee;
 
         //Effects
         job.status = JobStatus.Completed;
-        totalEscrowed[job.token] -= job.amount;
+        totalEscrowed[jobToken] -= jobAmount;
 
         // Interactions
-        _transferAsset(job.token, job.freelancer, freelancerAmount);
-        _transferAsset(job.token, feeRecipient, fee);
+        _transferAsset(jobToken, jobFreelancer, freelancerAmount);
+        _transferAsset(jobToken, feeRecipient, fee);
 
         emit WorkApproved(jobId, msg.sender);
-        emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
+        emit PaymentReleased(jobId, jobFreelancer, freelancerAmount, fee);
     }
 
     function cancelJob (uint256 jobId) external whenNotPaused nonReentrant {
-        if(jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
+        Job storage job = _getJobStorage(jobId);
+        address jobClient = job.client;
 
-        Job storage job = jobs[jobId];
-
-        if(msg.sender != job.client) {
+        if(msg.sender != jobClient) {
             revert Unauthorized();
         }
 
@@ -314,25 +313,25 @@ contract EscrowMarketplace is ReentrancyGuard {
             revert InvalidJobStatus();
         }
 
+        uint256 jobAmount = job.amount;
+        address jobToken = job.token;
+
         // Effects
         job.status = JobStatus.Cancelled;
-        totalEscrowed[job.token] -= job.amount;
+        totalEscrowed[jobToken] -= jobAmount;
 
         // Interaction
-        _transferAsset(job.token, job.client, job.amount);
+        _transferAsset(jobToken, jobClient, jobAmount);
 
         emit JobCancelled(jobId, msg.sender);
-        emit ClientRefunded(jobId, msg.sender, job.amount);
+        emit ClientRefunded(jobId, msg.sender, jobAmount);
     }
 
     function cancelExpiredJob (uint256 jobId) external whenNotPaused nonReentrant {
-        if(jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
+        Job storage job = _getJobStorage(jobId);
+        address jobClient = job.client;
 
-        Job storage job = jobs[jobId];
-
-        if(msg.sender != job.client) {
+        if(msg.sender != jobClient) {
             revert Unauthorized();
         }
 
@@ -344,23 +343,22 @@ contract EscrowMarketplace is ReentrancyGuard {
             revert DeadlineNotPassed();
         }
 
+        uint256 jobAmount = job.amount;
+        address jobToken = job.token;
+
         // Effects
         job.status = JobStatus.Cancelled;
-        totalEscrowed[job.token] -= job.amount;
+        totalEscrowed[jobToken] -= jobAmount;
 
         // Interaction
-        _transferAsset(job.token, job.client, job.amount);
+        _transferAsset(jobToken, jobClient, jobAmount);
 
         emit JobCancelled(jobId, msg.sender);
-        emit ClientRefunded(jobId, msg.sender, job.amount);
+        emit ClientRefunded(jobId, msg.sender, jobAmount);
     }
 
     function openDispute(uint256 jobId, string calldata reasonURI) external whenNotPaused {
-        if(jobId == 0 || jobId >= nextJobId){
-            revert JobDoesNotExist();
-        }
-
-        Job storage job = jobs[jobId];
+        Job storage job = _getJobStorage(jobId);
 
         if(msg.sender != job.client && msg.sender != job.freelancer){
             revert Unauthorized();
@@ -382,41 +380,39 @@ contract EscrowMarketplace is ReentrancyGuard {
     }
 
     function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external whenNotPaused nonReentrant {
-        if (jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
+        Job storage job = _getJobStorage(jobId);
 
         if (msg.sender != arbitrator) {
             revert Unauthorized();
         }
 
-        Job storage job = jobs[jobId];
-
         if (job.status != JobStatus.Disputed) {
             revert InvalidJobStatus();
         }
 
+        uint256 jobAmount = job.amount;
+
         if (
-            clientAmount > job.amount ||
-            freelancerAmount != job.amount - clientAmount
+            clientAmount > jobAmount ||
+            freelancerAmount != jobAmount - clientAmount
         ) {
             revert InvalidResolutionAmounts();
         }
 
-        uint256 fee =
-            (freelancerAmount * platformFeeBps)
-            / BPS_DENOMINATOR;
-
+        address jobToken = job.token;
+        address jobClient = job.client;
+        address jobFreelancer = job.freelancer;
+        uint256 fee = _calculateFee(freelancerAmount);
         uint256 freelancerNetAmount = freelancerAmount - fee;
 
         // Effects
         job.status = JobStatus.Completed;
-        totalEscrowed[job.token] -= job.amount;
+        totalEscrowed[jobToken] -= jobAmount;
 
         // Interactions
-        _transferAsset(job.token, job.client, clientAmount);
-        _transferAsset(job.token, job.freelancer, freelancerNetAmount);
-        _transferAsset(job.token, feeRecipient, fee);
+        _transferAsset(jobToken, jobClient, clientAmount);
+        _transferAsset(jobToken, jobFreelancer, freelancerNetAmount);
+        _transferAsset(jobToken, feeRecipient, fee);
 
         emit DisputeResolved(
             jobId,
@@ -426,20 +422,17 @@ contract EscrowMarketplace is ReentrancyGuard {
         );
 
         if (clientAmount > 0) {
-            emit ClientRefunded(jobId, job.client, clientAmount);
+            emit ClientRefunded(jobId, jobClient, clientAmount);
         }
 
-        emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
+        emit PaymentReleased(jobId, jobFreelancer, freelancerNetAmount, fee);
     }
 
     function claimAfterReviewPeriod(uint256 jobId) external nonReentrant whenNotPaused {
-        if (jobId == 0 || jobId >= nextJobId) {
-            revert JobDoesNotExist();
-        }
+        Job storage job = _getJobStorage(jobId);
+        address jobFreelancer = job.freelancer;
 
-        Job storage job = jobs[jobId];
-
-        if (msg.sender != job.freelancer) {
+        if (msg.sender != jobFreelancer) {
             revert Unauthorized();
         }
 
@@ -454,21 +447,21 @@ contract EscrowMarketplace is ReentrancyGuard {
             revert ReviewPeriodNotPassed();
         }
 
-        uint256 fee =
-            (job.amount * platformFeeBps) / BPS_DENOMINATOR;
-
-        uint256 freelancerAmount = job.amount - fee;
+        uint256 jobAmount = job.amount;
+        address jobToken = job.token;
+        uint256 fee = _calculateFee(jobAmount);
+        uint256 freelancerAmount = jobAmount - fee;
 
         // Effects
         job.status = JobStatus.Completed;
-        totalEscrowed[job.token] -= job.amount;
+        totalEscrowed[jobToken] -= jobAmount;
 
         // Interactions
-        _transferAsset(job.token, job.freelancer, freelancerAmount);
-        _transferAsset(job.token, feeRecipient, fee);
+        _transferAsset(jobToken, jobFreelancer, freelancerAmount);
+        _transferAsset(jobToken, feeRecipient, fee);
 
         emit PaymentClaimedAfterReview(jobId, msg.sender);
-        emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
+        emit PaymentReleased(jobId, jobFreelancer, freelancerAmount, fee);
     }
 
     function setFeeRecipient(address newFeeRecipient_) external onlyOwner{
