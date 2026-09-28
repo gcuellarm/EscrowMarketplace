@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {EscrowMarketplace} from "../src/EscrowMarketplace.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {ReentrancyAttacker} from "./mocks/ReentrancyAttacker.sol";
 
 contract EscrowMarketplaceTest is Test {
     EscrowMarketplace marketplace;
@@ -136,7 +137,10 @@ contract EscrowMarketplaceTest is Test {
         uint256 amount
     );
 
-
+    event ETHRecovered(
+        address indexed recipient,
+        uint256 amount
+    );
 
     ///////////////////////////////////////////
     // Helpers
@@ -177,6 +181,43 @@ contract EscrowMarketplaceTest is Test {
 
         vm.prank(client);
         marketplace.openDispute(jobId, disputeReasonURI);
+    }
+
+    function _createETHJob(uint256 ethAmount) internal returns (uint256 jobId) {
+        vm.deal(client, client.balance + ethAmount);
+
+        vm.prank(client);
+        jobId = marketplace.createJob{value: ethAmount}(
+            freelancer,
+            address(0),
+            ethAmount,
+            deadline,
+            metadataURI
+        );
+    }
+
+    function _createAndAcceptETHJob() internal returns (uint256 jobId) {
+        jobId = _createETHJob(1 ether);
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+    }
+
+    function _createAcceptAndSubmitETHJob() internal returns (uint256 jobId) {
+        jobId = _createAndAcceptETHJob();
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+    }
+
+    function _createDisputedETHJob() internal returns (uint256 jobId) {
+        jobId = _createAcceptAndSubmitETHJob();
+
+        vm.prank(client);
+        marketplace.openDispute(
+            jobId,
+            disputeReasonURI
+        );
     }
 
     ///////////////////////////////////////////
@@ -395,12 +436,12 @@ contract EscrowMarketplaceTest is Test {
         vm.stopPrank();
     }
 
-    function test_RevertIf_TokenIsZeroAddress() public {
+    function test_RevertIf_ETHJobHasNoValue() public {
         vm.startPrank(client);
 
         token.approve(address(marketplace), amount);
 
-        vm.expectRevert(EscrowMarketplace.InvalidAddress.selector);
+        vm.expectRevert(EscrowMarketplace.InvalidETHAmount.selector);
 
         marketplace.createJob({
             freelancer: freelancer,
@@ -2384,5 +2425,554 @@ contract EscrowMarketplaceTest is Test {
             token.balanceOf(recipient),
             accidentalAmount
         );
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //ETH fund
+    ///////////////////////////////////////////////////////////////
+    function test_CreateJobWithETH() public {
+        uint256 jobId = _createETHJob(1 ether);
+
+        EscrowMarketplace.Job memory job =
+            marketplace.getJob(jobId);
+
+        assertEq(jobId, 1);
+        assertEq(job.client, client);
+        assertEq(job.freelancer, freelancer);
+        assertEq(job.token, address(0));
+        assertEq(job.amount, 1 ether);
+
+        assertEq(
+            uint256(job.status),
+            uint256(EscrowMarketplace.JobStatus.Funded)
+        );
+
+        assertEq(address(marketplace).balance, 1 ether);
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            1 ether
+        );
+    }
+
+    function test_RevertIf_InsufficientETH() public {
+        vm.deal(client, 1 ether);
+
+        vm.prank(client);
+        vm.expectRevert(
+            EscrowMarketplace.InvalidETHAmount.selector
+        );
+
+        marketplace.createJob{value: 0.5 ether}(
+            freelancer,
+            address(0),
+            1 ether,
+            deadline,
+            metadataURI
+        );
+    }
+
+    function test_RevertIf_ExcessETH() public {
+        vm.deal(client, 2 ether);
+
+        vm.prank(client);
+        vm.expectRevert(
+            EscrowMarketplace.InvalidETHAmount.selector
+        );
+
+        marketplace.createJob{value: 2 ether}(
+            freelancer,
+            address(0),
+            1 ether,
+            deadline,
+            metadataURI
+        );
+    }
+
+    function test_RevertIf_ETHSentWithERC20Job() public {
+        vm.deal(client, 1 ether);
+
+        vm.prank(client);
+        vm.expectRevert(
+            EscrowMarketplace.InvalidETHAmount.selector
+        );
+
+        marketplace.createJob{value: 1 ether}(
+            freelancer,
+            address(token),
+            amount,
+            deadline,
+            metadataURI
+        );
+    }
+
+    function test_MultipleETHJobs_AccumulateEscrow() public {
+        _createETHJob(1 ether);
+        _createETHJob(2 ether);
+
+        assertEq(address(marketplace).balance, 3 ether);
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            3 ether
+        );
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //ETH approval and cancellation
+    ///////////////////////////////////////////////////////////////
+    function test_ApproveWorkWithETH() public {
+        uint256 jobId = _createAcceptAndSubmitETHJob();
+
+        uint256 fee =
+            (1 ether * platformFeeBps)
+            / marketplace.BPS_DENOMINATOR();
+
+        uint256 freelancerBalanceBefore =
+            freelancer.balance;
+
+        uint256 feeRecipientBalanceBefore =
+            feeRecipient.balance;
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        assertEq(
+            freelancer.balance,
+            freelancerBalanceBefore + 1 ether - fee
+        );
+
+        assertEq(
+            feeRecipient.balance,
+            feeRecipientBalanceBefore + fee
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(address(marketplace).balance, 0);
+
+        assertEq(
+            uint256(marketplace.getJob(jobId).status),
+            uint256(EscrowMarketplace.JobStatus.Completed)
+        );
+    }
+
+    function test_CancelJobWithETH() public {
+        uint256 jobId = _createETHJob(1 ether);
+
+        uint256 clientBalanceBefore = client.balance;
+
+        vm.prank(client);
+        marketplace.cancelJob(jobId);
+
+        assertEq(
+            client.balance,
+            clientBalanceBefore + 1 ether
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(address(marketplace).balance, 0);
+
+        assertEq(
+            uint256(marketplace.getJob(jobId).status),
+            uint256(EscrowMarketplace.JobStatus.Cancelled)
+        );
+    }
+
+    function test_CancelExpiredJobWithETH() public {
+        uint256 jobId = _createAndAcceptETHJob();
+
+        uint256 clientBalanceBefore = client.balance;
+
+        vm.warp(deadline + 1);
+
+        vm.prank(client);
+        marketplace.cancelExpiredJob(jobId);
+
+        assertEq(
+            client.balance,
+            clientBalanceBefore + 1 ether
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(address(marketplace).balance, 0);
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //ETH disputes and 
+    ///////////////////////////////////////////////////////////////
+    function test_ResolveDisputeWithETH() public {
+        uint256 jobId = _createDisputedETHJob();
+
+        uint256 clientAmount = 0.4 ether;
+        uint256 freelancerAmount = 0.6 ether;
+
+        uint256 fee =
+            (freelancerAmount * platformFeeBps)
+            / marketplace.BPS_DENOMINATOR();
+
+        uint256 clientBalanceBefore = client.balance;
+
+        uint256 freelancerBalanceBefore =
+            freelancer.balance;
+
+        uint256 feeRecipientBalanceBefore =
+            feeRecipient.balance;
+
+        vm.prank(arbitrator);
+        marketplace.resolveDispute(
+            jobId,
+            clientAmount,
+            freelancerAmount
+        );
+
+        assertEq(
+            client.balance,
+            clientBalanceBefore + clientAmount
+        );
+
+        assertEq(
+            freelancer.balance,
+            freelancerBalanceBefore
+                + freelancerAmount
+                - fee
+        );
+
+        assertEq(
+            feeRecipient.balance,
+            feeRecipientBalanceBefore + fee
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(address(marketplace).balance, 0);
+
+        assertEq(
+            uint256(marketplace.getJob(jobId).status),
+            uint256(EscrowMarketplace.JobStatus.Completed)
+        );
+    }
+
+    function test_ClaimAfterReviewPeriodWithETH() public {
+        uint256 jobId = _createAcceptAndSubmitETHJob();
+
+        EscrowMarketplace.Job memory job =
+            marketplace.getJob(jobId);
+
+        uint256 fee =
+            (job.amount * platformFeeBps)
+            / marketplace.BPS_DENOMINATOR();
+
+        uint256 freelancerBalanceBefore =
+            freelancer.balance;
+
+        uint256 feeRecipientBalanceBefore =
+            feeRecipient.balance;
+
+        vm.warp(
+            job.submittedAt
+                + marketplace.reviewPeriod()
+                + 1
+        );
+
+        vm.prank(freelancer);
+        marketplace.claimAfterReviewPeriod(jobId);
+
+        assertEq(
+            freelancer.balance,
+            freelancerBalanceBefore + job.amount - fee
+        );
+
+        assertEq(
+            feeRecipient.balance,
+            feeRecipientBalanceBefore + fee
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(address(marketplace).balance, 0);
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //ETH recovery
+    ///////////////////////////////////////////////////////////////
+    function test_OwnerCanRecoverETH() public {
+        address recoveryRecipient = makeAddr("recipient");
+
+        vm.deal(address(marketplace), 2 ether);
+
+        marketplace.recoverETH(2 ether, recoveryRecipient);
+
+        assertEq(recoveryRecipient.balance, 2 ether);
+        assertEq(address(marketplace).balance, 0);
+    }
+
+    function test_RecoverETH_EmitsEvent() public {
+        address recoveryRecipient = makeAddr("recipient");
+
+        vm.deal(address(marketplace), 1 ether);
+
+        vm.expectEmit(true, false, false, true);
+
+        emit ETHRecovered(recoveryRecipient, 1 ether);
+
+        marketplace.recoverETH(1 ether, recoveryRecipient);
+    }
+
+    function test_RevertIf_NonOwnerRecoversETH() public {
+        address recoveryRecipient = makeAddr("recipient");
+
+        vm.deal(address(marketplace), 1 ether);
+
+        vm.prank(stranger);
+
+        vm.expectRevert(
+            EscrowMarketplace.Unauthorized.selector
+        );
+
+        marketplace.recoverETH(1 ether, recoveryRecipient);
+    }
+
+    function test_RevertIf_RecoverETHRecipientIsZero()
+        public
+    {
+        vm.deal(address(marketplace), 1 ether);
+
+        vm.expectRevert(
+            EscrowMarketplace.InvalidAddress.selector
+        );
+
+        marketplace.recoverETH(
+            1 ether,
+            address(0)
+        );
+    }
+
+    function test_RevertIf_RecoverETHAmountIsZero()
+        public
+    {
+        address recoveryRecipient = makeAddr("recipient");
+
+        vm.expectRevert(
+            EscrowMarketplace.InvalidAmount.selector
+        );
+
+        marketplace.recoverETH(0, recoveryRecipient);
+    }
+
+    function test_RecoverETH_ProtectsEscrowedFunds()
+        public
+    {
+        address recoveryRecipient = makeAddr("recipient");
+
+        _createETHJob(1 ether);
+
+        vm.expectRevert(
+            EscrowMarketplace
+                .InsufficientRecoverableBalance
+                .selector
+        );
+
+        marketplace.recoverETH(
+            1 ether,
+            recoveryRecipient
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            1 ether
+        );
+
+        assertEq(address(marketplace).balance, 1 ether);
+    }
+
+    function test_RecoverETH_OnlyRecoversSurplus()
+        public
+    {
+        address recoveryRecipient = makeAddr("recipient");
+
+        _createETHJob(1 ether);
+
+        // Simulate accidental ETH.
+        vm.deal(address(marketplace), 1.5 ether);
+
+        marketplace.recoverETH(
+            0.5 ether,
+            recoveryRecipient
+        );
+
+        assertEq(recoveryRecipient.balance, 0.5 ether);
+
+        assertEq(
+            address(marketplace).balance,
+            1 ether
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            1 ether
+        );
+
+        vm.expectRevert(
+            EscrowMarketplace
+                .InsufficientRecoverableBalance
+                .selector
+        );
+
+        marketplace.recoverETH(1 wei, recoveryRecipient);
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //ETH and ERC20 simultaneously
+    ///////////////////////////////////////////////////////////////
+    function test_ETHAndERC20AccountingAreIndependent()
+        public
+    {
+        // Create ERC20 job.
+        uint256 erc20JobId = _createJob();
+
+        // Create ETH job.
+        uint256 ethJobId = _createETHJob(1 ether);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            amount
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            1 ether
+        );
+
+        // Cancel only the ETH job.
+        vm.prank(client);
+        marketplace.cancelJob(ethJobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(0)),
+            0
+        );
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            amount
+        );
+
+        assertEq(
+            token.balanceOf(address(marketplace)),
+            amount
+        );
+
+        // Cancel the remaining ERC20 job.
+        vm.prank(client);
+        marketplace.cancelJob(erc20JobId);
+
+        assertEq(
+            marketplace.totalEscrowed(address(token)),
+            0
+        );
+    }
+
+    ///////////////////////////////////////////////////////////////
+    //Reentrancy
+    ///////////////////////////////////////////////////////////////
+
+    function test_ReentrancyAttackIsBlocked() public {
+        ReentrancyAttacker attacker =
+            new ReentrancyAttacker(
+                address(marketplace)
+            );
+
+        uint256 ethAmount = 1 ether;
+
+        vm.deal(client, ethAmount);
+
+        vm.prank(client);
+        uint256 jobId =
+            marketplace.createJob{value: ethAmount}(
+                address(attacker),
+                address(0),
+                ethAmount,
+                deadline,
+                metadataURI
+            );
+
+        attacker.setJobId(jobId);
+
+        vm.prank(address(attacker));
+        marketplace.acceptJob(jobId);
+
+        vm.prank(address(attacker));
+        marketplace.submitWork(jobId, deliveryURI);
+
+        EscrowMarketplace.Job memory job =
+            marketplace.getJob(jobId);
+
+        vm.warp(job.submittedAt + marketplace.reviewPeriod() + 1);
+
+        uint256 expectedFee = (ethAmount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 expectedPayment = ethAmount - expectedFee;
+
+        vm.prank(address(attacker));
+        marketplace.claimAfterReviewPeriod(jobId);
+
+        assertTrue(attacker.attackAttempted());
+
+        assertFalse(attacker.attackSucceeded());
+
+        assertEq(address(attacker).balance, expectedPayment);
+
+        assertEq(marketplace.totalEscrowed(address(0)), 0);
+
+        assertEq(uint256(marketplace.getJob(jobId).status), uint256(EscrowMarketplace.JobStatus.Completed));
+    }
+
+    function test_NonReentrantDoesNotBreakNormalETHPayment() public {
+        uint256 ethAmount = 1 ether;
+
+        vm.deal(client, ethAmount);
+
+        vm.prank(client);
+        uint256 jobId =
+            marketplace.createJob{value: ethAmount}(
+                freelancer,
+                address(0),
+                ethAmount,
+                deadline,
+                metadataURI
+            );
+
+        vm.prank(freelancer);
+        marketplace.acceptJob(jobId);
+
+        vm.prank(freelancer);
+        marketplace.submitWork(jobId, deliveryURI);
+
+        uint256 fee =(ethAmount * platformFeeBps) / marketplace.BPS_DENOMINATOR();
+
+        uint256 balanceBefore = freelancer.balance;
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        assertEq(freelancer.balance, balanceBefore + ethAmount - fee);
     }
 }

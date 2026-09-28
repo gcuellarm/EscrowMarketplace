@@ -3,8 +3,9 @@ pragma solidity ^0.8.24;
 
 import "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol"; 
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract EscrowMarketplace {
+contract EscrowMarketplace is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum JobStatus {
@@ -65,6 +66,8 @@ contract EscrowMarketplace {
     error MarketPlaceIsPaused();
     error MarketPlaceNotPaused();
     error InsufficientRecoverableBalance();
+    error InvalidETHAmount();
+    error ETHTransferFailed();
 
 
     event JobCreated(uint256 indexed jobId, address indexed client, address indexed freelancer, address token, uint256 amount, uint256 deadline, string metadataURI);
@@ -85,6 +88,7 @@ contract EscrowMarketplace {
     event ArbitratorUpdated(address indexed oldArbitrator, address indexed newArbitrator);
     event ReviewPeriodUpdated(uint256 oldReviewPeriod, uint256 newReviewPeriod);
     event ERC20Recovered(address indexed token, uint256 amount, address indexed recipient);
+    event ETHRecovered(address indexed recipient, uint256 amount);
 
     modifier onlyOwner() {
         if(msg.sender != owner) {
@@ -128,12 +132,27 @@ contract EscrowMarketplace {
         paused = false;
     }
 
-    function createJob(address freelancer, address token, uint256 amount, uint256 deadline, string calldata metadataURI) external whenNotPaused returns (uint256 jobId)  {
-        if (freelancer == address(0)) {
-            revert InvalidAddress();
+    // Internal-Private Functions
+    function _transferAsset(address token, address recipient, uint256 amount) internal {
+        if (amount == 0) {
+            return;
         }
 
         if (token == address(0)) {
+            (bool success, ) = payable(recipient).call{value: amount}("");
+
+            if (!success) {
+                revert ETHTransferFailed();
+            }
+        } else {
+            IERC20(token).safeTransfer(recipient, amount);
+        }
+    }
+
+    // Public-External Functions
+
+    function createJob(address freelancer, address token, uint256 amount, uint256 deadline, string calldata metadataURI) external payable whenNotPaused nonReentrant returns (uint256 jobId)  {
+        if (freelancer == address(0)) {
             revert InvalidAddress();
         }
 
@@ -146,6 +165,16 @@ contract EscrowMarketplace {
         }
         if (deadline <= block.timestamp) {
             revert InvalidDeadline();
+        }
+
+        if (token == address(0)) {
+            if(msg.value != amount){
+                revert InvalidETHAmount();
+            }
+        } else {
+            if (msg.value != 0) {
+                revert InvalidETHAmount();
+            }
         }
 
         jobId = nextJobId;
@@ -165,8 +194,16 @@ contract EscrowMarketplace {
 
         nextJobId++;
 
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        // Transfer ERC20 funds when applicable.
+        if (token != address(0)) {
+            IERC20(token).safeTransferFrom(
+                msg.sender,
+                address(this),
+                amount
+            );
+        }
 
+        // Account for either ERC20 or native ETH.
         totalEscrowed[token] += amount;
 
         emit JobCreated(jobId, msg.sender, freelancer, token, amount, deadline, metadataURI);
@@ -231,7 +268,7 @@ contract EscrowMarketplace {
         emit WorkSubmitted(jobId, msg.sender, deliveryURI);
     }
 
-    function approveWork(uint256 jobId) external whenNotPaused {
+    function approveWork(uint256 jobId) external whenNotPaused nonReentrant {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -250,21 +287,19 @@ contract EscrowMarketplace {
 
         uint256 freelancerAmount = job.amount - fee;
 
-        IERC20(job.token).safeTransfer(job.freelancer, freelancerAmount);
-
-        if (fee > 0) {
-            IERC20(job.token).safeTransfer(feeRecipient, fee);
-        }
-
+        //Effects
+        job.status = JobStatus.Completed;
         totalEscrowed[job.token] -= job.amount;
 
-        job.status = JobStatus.Completed;
+        // Interactions
+        _transferAsset(job.token, job.freelancer, freelancerAmount);
+        _transferAsset(job.token, feeRecipient, fee);
 
         emit WorkApproved(jobId, msg.sender);
         emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
     }
 
-    function cancelJob (uint256 jobId) external whenNotPaused {
+    function cancelJob (uint256 jobId) external whenNotPaused nonReentrant {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -279,17 +314,18 @@ contract EscrowMarketplace {
             revert InvalidJobStatus();
         }
 
-        IERC20(job.token).safeTransfer(job.client, job.amount);
-
+        // Effects
+        job.status = JobStatus.Cancelled;
         totalEscrowed[job.token] -= job.amount;
 
-        job.status = JobStatus.Cancelled;
+        // Interaction
+        _transferAsset(job.token, job.client, job.amount);
 
         emit JobCancelled(jobId, msg.sender);
         emit ClientRefunded(jobId, msg.sender, job.amount);
     }
 
-    function cancelExpiredJob (uint256 jobId) external whenNotPaused {
+    function cancelExpiredJob (uint256 jobId) external whenNotPaused nonReentrant {
         if(jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
@@ -308,11 +344,12 @@ contract EscrowMarketplace {
             revert DeadlineNotPassed();
         }
 
-        IERC20(job.token).safeTransfer(job.client, job.amount);
-
+        // Effects
+        job.status = JobStatus.Cancelled;
         totalEscrowed[job.token] -= job.amount;
 
-        job.status = JobStatus.Cancelled;
+        // Interaction
+        _transferAsset(job.token, job.client, job.amount);
 
         emit JobCancelled(jobId, msg.sender);
         emit ClientRefunded(jobId, msg.sender, job.amount);
@@ -344,86 +381,94 @@ contract EscrowMarketplace {
         emit DisputeOpened(jobId, msg.sender, reasonURI);
     }
 
-    function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external whenNotPaused {
-        if(jobId == 0 || jobId >= nextJobId){
+    function resolveDispute(uint256 jobId, uint256 clientAmount, uint256 freelancerAmount) external whenNotPaused nonReentrant {
+        if (jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
 
-        if(msg.sender != arbitrator){
+        if (msg.sender != arbitrator) {
             revert Unauthorized();
         }
 
         Job storage job = jobs[jobId];
 
-        if(job.status != JobStatus.Disputed){
+        if (job.status != JobStatus.Disputed) {
             revert InvalidJobStatus();
         }
 
-        if(clientAmount + freelancerAmount != job.amount){
+        if (
+            clientAmount > job.amount ||
+            freelancerAmount != job.amount - clientAmount
+        ) {
             revert InvalidResolutionAmounts();
         }
 
-        uint256 fee = freelancerAmount * platformFeeBps / BPS_DENOMINATOR;
+        uint256 fee =
+            (freelancerAmount * platformFeeBps)
+            / BPS_DENOMINATOR;
+
         uint256 freelancerNetAmount = freelancerAmount - fee;
 
+        // Effects
         job.status = JobStatus.Completed;
+        totalEscrowed[job.token] -= job.amount;
 
-        if(clientAmount > 0) {
-            IERC20(job.token).safeTransfer(job.client, clientAmount);
-        }
+        // Interactions
+        _transferAsset(job.token, job.client, clientAmount);
+        _transferAsset(job.token, job.freelancer, freelancerNetAmount);
+        _transferAsset(job.token, feeRecipient, fee);
 
-        if(freelancerNetAmount > 0) {
-            IERC20(job.token).safeTransfer(job.freelancer, freelancerNetAmount);
-        }
+        emit DisputeResolved(
+            jobId,
+            msg.sender,
+            clientAmount,
+            freelancerAmount
+        );
 
-        if(fee > 0) {
-            IERC20(job.token).safeTransfer(feeRecipient, fee);
-        }
-
-        emit DisputeResolved(jobId, msg.sender, clientAmount, freelancerAmount);
-
-        if(clientAmount > 0) {
+        if (clientAmount > 0) {
             emit ClientRefunded(jobId, job.client, clientAmount);
         }
-        
-        totalEscrowed[job.token] -= job.amount;
 
         emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);   
     }
 
-    function claimAfterReviewPeriod(uint256 jobId) external whenNotPaused {
-        if(jobId == 0 || jobId >= nextJobId){
+    function claimAfterReviewPeriod(uint256 jobId) external nonReentrant whenNotPaused {
+        if (jobId == 0 || jobId >= nextJobId) {
             revert JobDoesNotExist();
         }
 
         Job storage job = jobs[jobId];
 
-        if(msg.sender != job.freelancer){
+        if (msg.sender != job.freelancer) {
             revert Unauthorized();
         }
 
-        if(job.status != JobStatus.Submitted){
+        if (job.status != JobStatus.Submitted) {
             revert InvalidJobStatus();
         }
 
-        if(block.timestamp < job.submittedAt + reviewPeriod){
+        if (
+            block.timestamp <
+            job.submittedAt + reviewPeriod
+        ) {
             revert ReviewPeriodNotPassed();
         }
 
-        uint256 fee = job.amount * platformFeeBps / BPS_DENOMINATOR;
-        uint256 freelancerNetAmount = job.amount - fee;
+        uint256 fee =
+            (job.amount * platformFeeBps) / BPS_DENOMINATOR;
 
-        IERC20(job.token).safeTransfer(job.freelancer, freelancerNetAmount);
-        if(fee > 0){
-            IERC20(job.token).safeTransfer(feeRecipient, fee);
-        }
+        uint256 freelancerAmount = job.amount - fee;
 
+        // Effects
+        job.status = JobStatus.Completed;
         totalEscrowed[job.token] -= job.amount;
 
-        job.status = JobStatus.Completed;
+        // Interactions
+        _transferAsset(job.token, job.freelancer, freelancerAmount);
+        _transferAsset(job.token, feeRecipient, fee);
 
         emit PaymentClaimedAfterReview(jobId, msg.sender);
-        emit PaymentReleased(jobId, job.freelancer, freelancerNetAmount, fee);
+        emit PaymentReleased(jobId, job.freelancer, freelancerAmount, fee);
     }
 
     function setFeeRecipient(address newFeeRecipient_) external onlyOwner{
@@ -462,7 +507,7 @@ contract EscrowMarketplace {
         emit ReviewPeriodUpdated(oldReviewPeriod, newReviewPeriod_);
     }
 
-    function recoverERC20(address token, uint256 amount, address recipient) external onlyOwner {
+    function recoverERC20(address token, uint256 amount, address recipient) external onlyOwner nonReentrant {
         if(token == address(0)){
             revert InvalidAddress();
         }
@@ -488,6 +533,33 @@ contract EscrowMarketplace {
         IERC20(token).safeTransfer(recipient, amount);
 
         emit ERC20Recovered(token, amount, recipient);
+    }
+
+    function recoverETH(uint256 amount, address recipient) external onlyOwner nonReentrant{
+        if(amount == 0) {
+            revert InvalidAmount();
+        }
+
+        if(recipient == address(0)) {
+            revert InvalidAddress();
+        }
+
+        uint256 balance = address(this).balance;
+        uint256 reserved = totalEscrowed[address(0)];
+
+        if(balance < reserved) {
+            revert InsufficientRecoverableBalance();
+        }
+
+        uint256 recoverable = balance - reserved;
+
+        if(amount > recoverable) {
+            revert InsufficientRecoverableBalance();
+        }
+
+        _transferAsset(address(0), recipient, amount);
+
+        emit ETHRecovered(recipient, amount);
     }
 
     function pause() external onlyOwner {
