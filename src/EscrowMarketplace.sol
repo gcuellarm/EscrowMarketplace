@@ -47,6 +47,9 @@ contract EscrowMarketplace is ReentrancyGuard {
 
     mapping(address => uint256) public totalEscrowed;
 
+    mapping(address => uint256[]) public clientJobs;
+    mapping(address => uint256[]) public freelancerJobs;
+
 
     error InvalidAddress();
     error InvalidAmount();
@@ -205,6 +208,9 @@ contract EscrowMarketplace is ReentrancyGuard {
             deliveryURI: "",
             disputeReasonURI: ""
         });
+
+        clientJobs[msg.sender].push(jobId);
+        freelancerJobs[freelancer].push(jobId);
 
         unchecked {
             ++nextJobId;
@@ -553,6 +559,22 @@ contract EscrowMarketplace is ReentrancyGuard {
         _transferAsset(address(0), recipient, amount);
 
         emit ETHRecovered(recipient, amount);
+    }
+
+    function getClientJobIds(address client) external view returns(uint256[]memory){
+        return clientJobs[client];
+    }
+
+    function getFreelancerJobIds(address freelancer) external view returns(uint256[]memory){
+        return freelancerJobs[freelancer];
+    }
+
+    function getClientJobCount(address client) external view returns(uint256){
+        return clientJobs[client].length;
+    }
+
+    function getFreelancerJobCount(address freelancer) external view returns(uint256){
+        return freelancerJobs[freelancer].length;
     }
 
     function pause() external onlyOwner {

@@ -2975,4 +2975,146 @@ contract EscrowMarketplaceTest is Test {
 
         assertEq(freelancer.balance, balanceBefore + ethAmount - fee);
     }
+
+    ///////////////////////////////////////////////////////////////
+    //Client-Freelancer jobs history
+    ///////////////////////////////////////////////////////////////
+
+    function test_CreateJob_AddsJobToClientHistory() public { 
+        uint256 jobId = _createJob();
+
+        uint256[] memory jobIds = marketplace.getClientJobIds(client);
+
+        assertEq(jobIds.length, 1);
+        assertEq(jobIds[0], jobId);
+    }
+
+    function test_CreateJob_AddsJobToFreelancerHistory() public { 
+        uint256 jobId = _createJob();
+
+        uint256[] memory jobIds = marketplace.getFreelancerJobIds(freelancer);
+
+        assertEq(jobIds.length, 1);
+        assertEq(jobIds[0], jobId);
+    }
+
+    function test_ClientHistoryStoresMultipleJobs() public {
+        uint256 secondAmount = amount;
+
+        token.mint(client, secondAmount);
+
+        vm.startPrank(client);
+
+        token.approve(address(marketplace), amount + secondAmount);
+
+        uint256 firstJobId =
+            marketplace.createJob(
+                freelancer,
+                address(token),
+                amount,
+                deadline,
+                metadataURI
+            );
+
+        uint256 secondJobId =
+            marketplace.createJob(
+                freelancer,
+                address(token),
+                secondAmount,
+                deadline,
+                "ipfs://second-job"
+            );
+
+        vm.stopPrank();
+
+        uint256[] memory jobIds = marketplace.getClientJobIds(client);
+
+        assertEq(jobIds.length, 2);
+        assertEq(jobIds[0], firstJobId);
+        assertEq(jobIds[1], secondJobId);
+    }
+
+    function test_FreelancerHistoriesAreIndependent() public {
+        address secondFreelancer = makeAddr("secondFreelancer");
+
+        token.mint(client, amount);
+
+        vm.startPrank(client);
+
+        token.approve(address(marketplace), amount * 2);
+
+        uint256 firstJobId =
+            marketplace.createJob(
+                freelancer,
+                address(token),
+                amount,
+                deadline,
+                metadataURI
+            );
+
+        uint256 secondJobId =
+            marketplace.createJob(
+                secondFreelancer,
+                address(token),
+                amount,
+                deadline,
+                "ipfs://second-job"
+            );
+
+        vm.stopPrank();
+
+        uint256[] memory firstHistory = marketplace.getFreelancerJobIds(freelancer);
+
+        uint256[] memory secondHistory = marketplace.getFreelancerJobIds(secondFreelancer);
+
+        assertEq(firstHistory.length, 1);
+        assertEq(secondHistory.length, 1);
+
+        assertEq(firstHistory[0], firstJobId);
+        assertEq(secondHistory[0], secondJobId);
+    }
+
+    function test_CompletedJobRemainsInHistory() public {
+        uint256 jobId = _createAcceptAndSubmitJob();
+
+        vm.prank(client);
+        marketplace.approveWork(jobId);
+
+        uint256[] memory clientHistory = marketplace.getClientJobIds(client);
+
+        uint256[] memory freelancerHistory = marketplace.getFreelancerJobIds(freelancer);
+
+        assertEq(clientHistory.length, 1);
+        assertEq(freelancerHistory.length, 1);
+
+        assertEq(clientHistory[0], jobId);
+        assertEq(freelancerHistory[0], jobId);
+
+        assertEq(uint256(marketplace.getJob(jobId).status), uint256(EscrowMarketplace.JobStatus.Completed));
+    }
+
+    function test_ClientJobCount() public {
+        assertEq(marketplace.getClientJobCount(client),0);
+
+        _createJob();
+
+        assertEq(marketplace.getClientJobCount(client), 1);
+    }
+
+    function test_FreelancerJobCount() public {
+        assertEq(marketplace.getFreelancerJobCount(freelancer), 0);
+
+        _createJob();
+
+        assertEq(marketplace.getFreelancerJobCount(freelancer), 1);
+    }
+
+    function test_UserWithoutJobsReturnsEmptyHistory() public view {
+        uint256[] memory clientHistory = marketplace.getClientJobIds(stranger);
+
+        uint256[] memory freelancerHistory = marketplace.getFreelancerJobIds(stranger);
+
+        assertEq(clientHistory.length, 0);
+        assertEq(freelancerHistory.length, 0);
+    }
 }

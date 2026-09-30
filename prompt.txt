@@ -1,0 +1,449 @@
+# Objetivo
+
+Optimizar y limpiar el contrato `EscrowMarketplace` sin cambiar su comportamiento funcional.
+
+Las optimizaciones deben priorizar:
+
+- reducción de código duplicado;
+- reducción de lecturas repetidas de storage;
+- consistencia interna;
+- facilidad de auditoría;
+- mantenimiento de la legibilidad;
+- medición real del consumo de gas.
+
+No realizar optimizaciones agresivas que compliquen el contrato innecesariamente.
+
+---
+
+# 1. Crear un helper interno para obtener Jobs
+
+Actualmente varias funciones repiten la validación:
+
+```solidity
+if (jobId == 0 || jobId >= nextJobId) {
+    revert JobDoesNotExist();
+}
+
+Job storage job = jobs[jobId];
+```
+
+Crear una función interna:
+
+```solidity
+function _getJobStorage(
+    uint256 jobId
+) internal view returns (Job storage job) {
+    if (jobId == 0 || jobId >= nextJobId) {
+        revert JobDoesNotExist();
+    }
+
+    job = jobs[jobId];
+}
+```
+
+Después sustituir la validación repetida por:
+
+```solidity
+Job storage job = _getJobStorage(jobId);
+```
+
+Aplicarlo al menos en:
+
+```text
+acceptJob()
+submitWork()
+approveWork()
+cancelJob()
+cancelExpiredJob()
+openDispute()
+resolveDispute()
+claimAfterReviewPeriod()
+getJob()
+```
+
+El objetivo principal aquí es reducir duplicación y centralizar la validación de existencia de Jobs.
+
+---
+
+# 2. Crear un helper para calcular las comisiones
+
+Actualmente el cálculo de fees aparece en varias funciones:
+
+```solidity
+(amount * platformFeeBps) / BPS_DENOMINATOR
+```
+
+Crear:
+
+```solidity
+function _calculateFee(
+    uint256 amount
+) internal view returns (uint256) {
+    return (amount * platformFeeBps)
+        / BPS_DENOMINATOR;
+}
+```
+
+Utilizarlo en:
+
+```text
+approveWork()
+resolveDispute()
+claimAfterReviewPeriod()
+```
+
+Por ejemplo:
+
+```solidity
+uint256 fee = _calculateFee(jobAmount);
+```
+
+En `resolveDispute()` la fee debe calcularse sobre `freelancerAmount`, no sobre el importe total del Job.
+
+---
+
+# 3. Optimizar el incremento de `nextJobId`
+
+En `createJob()` sustituir:
+
+```solidity
+nextJobId++;
+```
+
+por:
+
+```solidity
+unchecked {
+    ++nextJobId;
+}
+```
+
+El riesgo de overflow se considera irrelevante en este caso porque alcanzar `type(uint256).max` Jobs es prácticamente imposible.
+
+No utilizar `unchecked` indiscriminadamente en otras operaciones.
+
+---
+
+# 4. Cachear valores de storage utilizados varias veces
+
+Cuando una función utiliza repetidamente campos del `Job`, almacenarlos en variables locales antes de modificar el estado.
+
+Por ejemplo:
+
+```solidity
+uint256 jobAmount = job.amount;
+address jobToken = job.token;
+address jobFreelancer = job.freelancer;
+```
+
+Esto debe utilizarse especialmente en funciones que posteriormente realizan transferencias o emiten eventos.
+
+Aplicarlo principalmente en:
+
+```text
+approveWork()
+cancelJob()
+cancelExpiredJob()
+resolveDispute()
+claimAfterReviewPeriod()
+```
+
+Ejemplo en `approveWork()`:
+
+```solidity
+uint256 jobAmount = job.amount;
+address jobToken = job.token;
+address jobFreelancer = job.freelancer;
+
+uint256 fee = _calculateFee(jobAmount);
+uint256 freelancerAmount = jobAmount - fee;
+
+job.status = JobStatus.Completed;
+totalEscrowed[jobToken] -= jobAmount;
+```
+
+Después utilizar las variables locales en transferencias y eventos.
+
+---
+
+# 5. Mantener Checks-Effects-Interactions
+
+No cambiar el orden seguro que ya utiliza el contrato.
+
+Todas las funciones que mueven fondos deben seguir el patrón:
+
+```text
+1. Validaciones
+2. Cálculos
+3. Actualización de estado
+4. Actualización de totalEscrowed
+5. Transferencias externas
+6. Eventos
+```
+
+Por ejemplo:
+
+```solidity
+job.status = JobStatus.Completed;
+totalEscrowed[jobToken] -= jobAmount;
+
+_transferAsset(...);
+_transferAsset(...);
+```
+
+Las transferencias no deben realizarse antes de actualizar el estado interno.
+
+---
+
+# 6. Mantener `ReentrancyGuard`
+
+No eliminar las protecciones del día anterior.
+
+Deben continuar utilizando `nonReentrant` las funciones que manejan fondos:
+
+```text
+createJob()
+approveWork()
+cancelJob()
+cancelExpiredJob()
+resolveDispute()
+claimAfterReviewPeriod()
+recoverERC20()
+recoverETH()
+```
+
+La optimización de gas no debe reducir las garantías de seguridad.
+
+---
+
+# 7. No modificar `_transferAsset()`
+
+Mantener el helper utilizado para transferir ETH o ERC20.
+
+Conceptualmente:
+
+```solidity
+function _transferAsset(
+    address token,
+    address recipient,
+    uint256 amount
+) internal
+```
+
+Debe seguir distinguiendo:
+
+```text
+token == address(0)  → ETH
+token != address(0)  → ERC20
+```
+
+No duplicar esta lógica dentro de las funciones principales.
+
+---
+
+# 8. Simplificar las funciones existentes
+
+Después de crear `_getJobStorage()` y `_calculateFee()`, actualizar las funciones para utilizarlos.
+
+Ejemplo de estructura deseada para `approveWork()`:
+
+```solidity
+function approveWork(
+    uint256 jobId
+) external whenNotPaused nonReentrant {
+    Job storage job = _getJobStorage(jobId);
+
+    if (msg.sender != job.client) {
+        revert Unauthorized();
+    }
+
+    if (job.status != JobStatus.Submitted) {
+        revert InvalidJobStatus();
+    }
+
+    uint256 jobAmount = job.amount;
+    address jobToken = job.token;
+    address jobFreelancer = job.freelancer;
+
+    uint256 fee = _calculateFee(jobAmount);
+    uint256 freelancerAmount = jobAmount - fee;
+
+    job.status = JobStatus.Completed;
+    totalEscrowed[jobToken] -= jobAmount;
+
+    _transferAsset(
+        jobToken,
+        jobFreelancer,
+        freelancerAmount
+    );
+
+    _transferAsset(
+        jobToken,
+        feeRecipient,
+        fee
+    );
+
+    emit WorkApproved(jobId, msg.sender);
+
+    emit PaymentReleased(
+        jobId,
+        jobFreelancer,
+        freelancerAmount,
+        fee
+    );
+}
+```
+
+Aplicar el mismo criterio al resto de funciones modificadas.
+
+---
+
+# 9. No optimizar el `Job struct` todavía
+
+No cambiar tipos como:
+
+```solidity
+uint256 deadline;
+uint256 submittedAt;
+```
+
+por tipos más pequeños como:
+
+```solidity
+uint64
+```
+
+aunque puedan permitir cierto storage packing.
+
+Razones:
+
+- empeora la legibilidad;
+- obliga a introducir casts;
+- aumenta la complejidad;
+- el beneficio no justifica el cambio para un proyecto de portfolio.
+
+Mantener el `struct` actual.
+
+---
+
+# 10. No utilizar assembly
+
+No introducir assembly para obtener pequeñas reducciones de gas.
+
+El proyecto debe priorizar código:
+
+- claro;
+- mantenible;
+- seguro;
+- fácil de explicar en una entrevista.
+
+No sustituir funciones estándar o SafeERC20 por implementaciones assembly.
+
+---
+
+# 11. No cambiar el comportamiento funcional
+
+Las optimizaciones deben ser transparentes para los usuarios.
+
+Todos los tests anteriores deben seguir pasando sin modificaciones funcionales.
+
+Especialmente revisar:
+
+```text
+createJob
+acceptJob
+submitWork
+approveWork
+cancelJob
+cancelExpiredJob
+openDispute
+resolveDispute
+claimAfterReviewPeriod
+recoverERC20
+recoverETH
+reentrancy
+```
+
+Si una optimización provoca que un test funcional deje de pasar, revisar primero la optimización antes de modificar el test.
+
+---
+
+# 12. Ejecutar la suite completa
+
+Después de aplicar todos los cambios:
+
+```bash
+forge test -vv
+```
+
+Todo debe continuar en verde.
+
+---
+
+# 13. Medir gas
+
+Ejecutar:
+
+```bash
+forge test --gas-report
+```
+
+Revisar especialmente el consumo de:
+
+```text
+createJob()
+approveWork()
+cancelJob()
+cancelExpiredJob()
+resolveDispute()
+claimAfterReviewPeriod()
+```
+
+No buscar necesariamente el mínimo absoluto de gas.
+
+El objetivo es confirmar que las modificaciones no generan regresiones significativas y que las optimizaciones aplicadas tienen sentido.
+
+---
+
+# 14. Crear snapshot de gas
+
+Ejecutar:
+
+```bash
+forge snapshot
+```
+
+Esto generará:
+
+```text
+.gas-snapshot
+```
+
+Mantener este archivo en el repositorio.
+
+En futuras modificaciones se podrá ejecutar:
+
+```bash
+forge snapshot --check
+```
+
+para detectar regresiones de gas.
+
+---
+
+# Resultado esperado
+
+Al terminar esta tarea, el contrato debe:
+
+- tener menos código duplicado;
+- centralizar la validación de Jobs;
+- centralizar el cálculo de fees;
+- evitar lecturas repetidas de storage cuando sea razonable;
+- utilizar `unchecked` únicamente donde esté justificado;
+- mantener `ReentrancyGuard`;
+- mantener Checks-Effects-Interactions;
+- conservar exactamente el mismo comportamiento funcional;
+- mantener todos los tests anteriores en verde;
+- disponer de un `.gas-snapshot` para controlar futuras regresiones.
+
+No añadir nuevas funcionalidades durante esta fase. El objetivo es exclusivamente limpiar, simplificar y optimizar el contrato existente.
