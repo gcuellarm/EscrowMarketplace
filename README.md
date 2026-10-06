@@ -2,7 +2,7 @@
 
 A Foundry-based Solidity escrow marketplace where clients fund freelance jobs with native ETH or ERC20 tokens, freelancers deliver work, and escrow is settled through client approval, a time-based freelancer claim, cancellation, or arbitrator dispute resolution.
 
-> Current status: the core escrow lifecycle, administration, asset accounting, recovery safeguards, and unit test suite are implemented. This project has not been audited and is not production-ready.
+> Current status: the core escrow lifecycle, administration, asset accounting, recovery safeguards, and unit, fuzz, and invariant test suites are implemented. This project has not been audited and is not production-ready.
 
 ## What is implemented so far ✅
 
@@ -23,7 +23,8 @@ A Foundry-based Solidity escrow marketplace where clients fund freelance jobs wi
 - **Owner administration** for the fee recipient, platform fee, arbitrator, review period, and emergency pause state.
 - **Reentrancy protection** on funding and every function that transfers assets out of the contract.
 - **Custom errors and events** for explicit failure handling and off-chain indexing.
-- **Foundry tests** covering ETH and ERC20 flows, lifecycle transitions, permissions, validation, events, fees, refunds, disputes, review-period claims, pausing, recovery limits, escrow accounting, histories, and an ETH reentrancy attempt.
+- **Foundry unit, edge-case, and fuzz tests** covering ETH and ERC20 flows, lifecycle transitions, boundary conditions, permissions, validation, events, fees, refunds, disputes, review-period claims, pausing, recovery limits, escrow accounting, histories, transfer rollback, dynamic configuration, and an ETH reentrancy attempt.
+- **Stateful invariant tests** checking that ERC20 reserves never exceed the contract balance, exact-balance accounting under the handler's supported actions, and agreement between `totalEscrowed` and active jobs.
 - **GitHub Actions CI** configured to build the contracts and run the complete Forge test suite on pushes and pull requests.
 
 ## Contract overview
@@ -111,6 +112,11 @@ src/
 
 test/
   EscrowMarketplace.t.sol      # Unit tests for the complete marketplace workflow
+  EscrowMarketplaceEdgeCases.t.sol # Boundary, rollback, and configuration edge cases
+  EscrowMarketplaceFuzz.t.sol  # Property-oriented fuzz tests for amounts and allocations
+  invariant/
+    EscrowMarketplaceHandler.sol     # Stateful action handler
+    EscrowMarketplaceInvariant.t.sol # Escrow accounting invariants
   mocks/MockERC20.sol          # Mintable ERC20 test token
   mocks/ReentrancyAttacker.sol # ETH receiver used to test reentrancy protection
 
@@ -133,6 +139,15 @@ Run the test suite:
 
 ```shell
 forge test
+```
+
+Run one suite in isolation:
+
+```shell
+forge test --match-path test/EscrowMarketplace.t.sol
+forge test --match-path test/EscrowMarketplaceEdgeCases.t.sol
+forge test --match-path test/EscrowMarketplaceFuzz.t.sol
+forge test --match-path 'test/invariant/*.t.sol'
 ```
 
 Run tests with a gas report or refresh the committed snapshot:
@@ -158,6 +173,7 @@ forge lint
 - Pausing blocks job creation and lifecycle transitions, but read operations, owner configuration, and surplus recovery remain available.
 - Metadata and delivery content live off-chain; the contract stores only their URI strings and does not validate their contents or availability.
 - The owner and arbitrator are privileged roles. Ownership transfer and renunciation are not currently implemented.
+- `Created` and `Approved` are reserved enum values; the implemented lifecycle stores new jobs as `Funded` and settled jobs as `Completed`.
 - Surplus recovery protects the amount tracked in `totalEscrowed`, but unsupported token mechanics can invalidate that accounting assumption.
 - The contract has not been audited. Do not use it in production without a full security review and deployment-specific threat modelling.
 
